@@ -254,3 +254,14 @@ yarl==1.18.3
 zope.event==5.0
 zope.interface==7.2
 zstandard==0.23.0
+
+torch
+fastapi
+transformers
+pydantic_settings
+uvicorn
+pillow
+python-multipart
+pyvips
+einops
+accelerate

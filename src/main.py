@@ -19,9 +19,13 @@ from time import perf_counter
 import io
 from tts_config import SPEED, ResponseFormat, config  # Import from tts_config
 
+from PIL import Image
+from fastapi import UploadFile, File
+
+
 # Configuration Settings for the main app
 class Settings(BaseSettings):
-    model_name: str = "Qwen/Qwen2.5-3B-Instruct"
+    llm_model_name: str = "Qwen/Qwen2.5-3B-Instruct"
     max_tokens: int = 512
     host: str = "0.0.0.0"
     port: int = 7860
@@ -38,6 +42,24 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"  # Load from .env file if present
+
+
+if torch.cuda.is_available():
+    device = "cuda:0"
+else:
+    device = "cpu"
+torch_dtype = torch.float16 if device != "cpu" else torch.float32
+
+
+model_vlm = AutoModelForCausalLM.from_pretrained(
+    "vikhyatk/moondream2",
+    revision="2025-01-09",
+    trust_remote_code=True,
+    device_map={"": device}
+)
+
+
+
 
 settings = Settings()
 
@@ -69,15 +91,20 @@ app.state.limiter = limiter
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch_dtype = torch.float16 if device != "cpu" else torch.float32
 
+device_translation = torch.device("cpu")
+
+torch_dtype_translation = torch.float16 if device != "cpu" else torch.float32
+
+
 # Model and tokenizer initialization
-model = AutoModelForCausalLM.from_pretrained(
-    settings.model_name,
+llm_model = AutoModelForCausalLM.from_pretrained(
+    settings.llm_model_name,
     torch_dtype=torch.float16,
     device_map="auto",
     trust_remote_code=True,
     low_cpu_mem_usage=True
 ).to(device)
-tokenizer = AutoTokenizer.from_pretrained(settings.model_name)
+llm_tokenizer = AutoTokenizer.from_pretrained(settings.llm_model_name)
 ip = IndicProcessor(inference=True)
 src_lang, tgt_lang = "eng_Latn", "kan_Knda"
 model_name_trans_indic_en = "ai4bharat/indictrans2-indic-en-dist-200M"
@@ -86,17 +113,17 @@ tokenizer_trans_indic_en = AutoTokenizer.from_pretrained(model_name_trans_indic_
 model_trans_indic_en = AutoModelForSeq2SeqLM.from_pretrained(
     model_name_trans_indic_en,
     trust_remote_code=True,
-    torch_dtype=torch.float16,
-    attn_implementation="flash_attention_2",
-    device_map="auto"
+    torch_dtype=torch_dtype_translation,
+    #attn_implementation="flash_attention_2",
+    device_map="cpu"
 )
 tokenizer_trans_en_indic = AutoTokenizer.from_pretrained(model_name_trans_en_indic, trust_remote_code=True)
 model_trans_en_indic = AutoModelForSeq2SeqLM.from_pretrained(
     model_name_trans_en_indic,
     trust_remote_code=True,
-    torch_dtype=torch.float16,
-    attn_implementation="flash_attention_2",
-    device_map="auto"
+    torch_dtype=torch_dtype_translation,
+    #attn_implementation="flash_attention_2",
+    device_map="cpu"
 )
 logger.info("Models and tokenizers initialized successfully")
 
@@ -226,7 +253,7 @@ tts_model_manager = TTSModelManager()
 @app.get("/health", summary="Check API health")
 async def health_check():
     """Return the health status and model name."""
-    return {"status": "healthy", "model": settings.model_name}
+    return {"status": "healthy", "model": settings.llm_model_name}
 
 @app.get("/", summary="Redirect to API docs")
 async def home():
@@ -316,10 +343,10 @@ async def chat(request: Request, chat_request: ChatRequest, api_key: str = Depen
             {"role": "user", "content": translated_prompt}
         ]
         
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        model_inputs = tokenizer([text], return_tensors="pt").to(device)
+        text = llm_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        model_inputs = llm_tokenizer([text], return_tensors="pt").to(device)
 
-        generated_ids = model.generate(
+        generated_ids = llm_model.generate(
             **model_inputs,
             max_new_tokens=settings.max_tokens,
             do_sample=True,
@@ -327,7 +354,7 @@ async def chat(request: Request, chat_request: ChatRequest, api_key: str = Depen
         )
         generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)]
 
-        response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        response = llm_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
         logger.info(f"Generated English response: {response}")
 
         translated_response = translate_text(response, src_lang="eng_Latn", tgt_lang="kan_Knda")
@@ -337,6 +364,47 @@ async def chat(request: Request, chat_request: ChatRequest, api_key: str = Depen
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+
+@app.post("/caption/")
+async def caption_image(file: UploadFile = File(...), length: str = "normal"):
+    if model_vlm is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    image = Image.open(file.file)
+    if length == "short":
+        caption = model_vlm.caption(image, length="short")["caption"]
+    else:
+        caption = model_vlm.caption(image, length="normal")
+    return {"caption": caption}
+
+@app.post("/visual_query/")
+async def visual_query(file: UploadFile = File(...), query: str = Body(...)):
+    if model_vlm is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    image = Image.open(file.file)
+    answer = model_vlm.query(image, query)["answer"]
+    return {"answer": answer}
+
+@app.post("/detect/")
+async def detect_objects(file: UploadFile = File(...), object_type: str = "face"):
+    if model_vlm is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    image = Image.open(file.file)
+    objects = model_vlm.detect(image, object_type)["objects"]
+    return {"objects": objects}
+
+@app.post("/point/")
+async def point_objects(file: UploadFile = File(...), object_type: str = "person"):
+    if model_vlm is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    image = Image.open(file.file)
+    points = model_vlm.point(image, object_type)["points"]
+    return {"points": points}
+
 
 # Main execution
 if __name__ == "__main__":
