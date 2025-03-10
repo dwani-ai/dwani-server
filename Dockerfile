@@ -25,4 +25,4 @@ USER appuser
 EXPOSE 7860
 
 # Use absolute path for clarity
-CMD ["python", "/app/src/main.py", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["python", "/app/src/server/main.py", "--host", "0.0.0.0", "--port", "7860"]

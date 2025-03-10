@@ -189,7 +189,7 @@ def translate_text(text, src_lang, tgt_lang):
         padding="longest",
         return_tensors="pt",
         return_attention_mask=True,
-    ).to(device)
+    ).to(device_translation)
 
     with torch.no_grad():
         generated_tokens = model_trans.generate(
