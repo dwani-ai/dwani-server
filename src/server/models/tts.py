@@ -1,4 +1,5 @@
-from transformers import AutoTokenizer, ParlerTTSForConditionalGeneration
+from transformers import AutoTokenizer
+from parler_tts import ParlerTTSForConditionalGeneration
 from typing import OrderedDict, Tuple
 import torch
 import numpy as np

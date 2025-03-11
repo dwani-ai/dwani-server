@@ -1,7 +1,7 @@
 import logging
 import logging.config
 from logging.handlers import RotatingFileHandler
-from tts_config import config
+from .tts_config import config
 
 logging_config = {
     "version": 1,
