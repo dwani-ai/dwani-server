@@ -14,21 +14,17 @@ class TTSManager:
         self.max_models = max_models
 
     def load_model(self, model_name: str) -> Tuple[ParlerTTSForConditionalGeneration, AutoTokenizer, AutoTokenizer]:
-        logger.debug(f"Loading {model_name}...")
-        start = perf_counter()
-        model = ParlerTTSForConditionalGeneration.from_pretrained(model_name).to(self.device, dtype=self.torch_dtype)
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        desc_tokenizer = AutoTokenizer.from_pretrained(model.config.text_encoder._name_or_path)
-        logger.info(f"Loaded {model_name} in {perf_counter() - start:.2f}s")
-        return model, tokenizer, desc_tokenizer
-
-    def get_or_load_model(self, model_name: str) -> Tuple[ParlerTTSForConditionalGeneration, AutoTokenizer, AutoTokenizer]:
         if model_name not in self.models:
-            logger.info(f"Model {model_name} isn't already loaded")
-            if len(self.models) >= self.max_models:
+            logger.debug(f"Loading {model_name}...")
+            start = perf_counter()
+            model = ParlerTTSForConditionalGeneration.from_pretrained(model_name).to(self.device, dtype=self.torch_dtype)
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            desc_tokenizer = AutoTokenizer.from_pretrained(model.config.text_encoder._name_or_path)
+            self.models[model_name] = (model, tokenizer, desc_tokenizer)
+            logger.info(f"Loaded {model_name} in {perf_counter() - start:.2f}s")
+            if len(self.models) > self.max_models:
                 logger.info("Unloading the oldest loaded model")
                 del self.models[next(iter(self.models))]
-            self.models[model_name] = self.load_model(model_name)
         return self.models[model_name]
 
     def chunk_text(self, text: str, chunk_size: int = 15) -> list[str]:
@@ -38,7 +34,7 @@ class TTSManager:
     def generate_audio(self, text: str, voice: str, model_name: str, speed: float = SPEED) -> np.ndarray:
         if speed != SPEED:
             logger.warning("Speed adjustment not supported; using default speed")
-        model, tokenizer, desc_tokenizer = self.get_or_load_model(model_name)
+        model, tokenizer, desc_tokenizer = self.load_model(model_name)
         chunks = self.chunk_text(text)
         
         start = perf_counter()

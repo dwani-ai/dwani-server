@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 from config.logging_config import logger
 
 class Settings(BaseSettings):
-    api_key: str  # Required, set via env var
+    api_key: str
     class Config:
         env_file = ".env"
 

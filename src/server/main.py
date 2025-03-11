@@ -1,5 +1,5 @@
-from fastapi import FastAPI, Request, HTTPException, Body, UploadFile, File, Depends
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi import FastAPI, Request, HTTPException, Body, UploadFile, File, Depends, Query
+from fastapi.responses import RedirectResponse, StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings
@@ -7,9 +7,13 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 import io
 import soundfile as sf
+import tempfile
+from time import time
 import argparse
 import uvicorn
 from PIL import Image
+from typing import List
+from pydub import AudioSegment
 
 from config.logging_config import logger
 from config.tts_config import SPEED, ResponseFormat, config as tts_config
@@ -17,6 +21,7 @@ from models.llm import LLMManager
 from models.translation import TranslationManager
 from models.tts import TTSManager
 from models.vlm import VLMManager
+from models.asr import ASRManager
 from utils.auth import get_api_key, settings as auth_settings
 
 class Settings(BaseSettings):
@@ -48,12 +53,13 @@ app.add_middleware(
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 
-# Initialize model managers
+# Initialize model managers with lazy loading
 llm_manager = LLMManager(settings.llm_model_name)
 trans_to_en = TranslationManager("kan_Knda", "eng_Latn")
 trans_to_kn = TranslationManager("eng_Latn", "kan_Knda")
 tts_manager = TTSManager()
 vlm_manager = VLMManager()
+asr_manager = ASRManager()
 
 # Request/Response Models
 class ChatRequest(BaseModel):
@@ -85,6 +91,12 @@ class SpeechRequest(BaseModel):
             raise ValueError(f"Response format must be one of {[fmt.value for fmt in supported_formats]}")
         return v
 
+class TranscriptionResponse(BaseModel):
+    text: str
+
+class BatchTranscriptionResponse(BaseModel):
+    transcriptions: List[str]
+
 # Endpoints
 @app.get("/health")
 async def health_check():
@@ -93,6 +105,22 @@ async def health_check():
 @app.get("/")
 async def home():
     return RedirectResponse(url="/docs")
+
+@app.post("/load_all_models")
+async def load_all_models(api_key: str = Depends(get_api_key)):
+    try:
+        logger.info("Starting to load all models...")
+        llm_manager.load()
+        trans_to_en.load()
+        trans_to_kn.load()
+        tts_manager.load_model(tts_config.model)
+        vlm_manager.load()
+        asr_manager.load()  # Load default ASR model (kn)
+        logger.info("All models loaded successfully")
+        return {"status": "success", "message": "All models loaded"}
+    except Exception as e:
+        logger.error(f"Error loading models: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to load models: {str(e)}")
 
 @app.post("/v1/audio/speech")
 @limiter.limit(settings.speech_rate_limit)
@@ -155,6 +183,80 @@ async def point_objects(file: UploadFile = File(...), object_type: str = "person
     image = Image.open(file.file)
     points = vlm_manager.point(image, object_type)
     return {"points": points}
+
+@app.post("/transcribe/", response_model=TranscriptionResponse)
+async def transcribe_audio(file: UploadFile = File(...), language: str = Query(..., enum=list(asr_manager.model_language.keys())), api_key: str = Depends(get_api_key)):
+    start_time = time()
+    try:
+        file_extension = file.filename.split(".")[-1].lower()
+        if file_extension not in ["wav", "mp3"]:
+            logger.warning(f"Unsupported file format: {file_extension}")
+            raise HTTPException(status_code=400, detail="Unsupported file format. Please upload a WAV or MP3 file.")
+
+        file_content = await file.read()
+        audio = AudioSegment.from_mp3(io.BytesIO(file_content)) if file_extension == "mp3" else AudioSegment.from_wav(io.BytesIO(file_content))
+        if audio.frame_rate != 16000:
+            audio = audio.set_frame_rate(16000).set_channels(1)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+            audio.export(tmp_file.name, format="wav")
+            tmp_file_path = tmp_file.name
+
+        chunk_file_paths = asr_manager.split_audio(tmp_file_path)
+        try:
+            language_id = asr_manager.model_language.get(language, asr_manager.default_language)
+            transcription = asr_manager.transcribe(chunk_file_paths, language_id)
+            logger.info(f"Transcription completed in {time() - start_time:.2f} seconds")
+            return JSONResponse(content={"text": transcription})
+        finally:
+            for chunk_file_path in chunk_file_paths:
+                if os.path.exists(chunk_file_path):
+                    os.remove(chunk_file_path)
+            if os.path.exists(tmp_file_path):
+                os.remove(tmp_file_path)
+            asr_manager.cleanup()
+    except Exception as e:
+        logger.error(f"Error during transcription: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+@app.post("/transcribe_batch/", response_model=BatchTranscriptionResponse)
+async def transcribe_audio_batch(files: List[UploadFile] = File(...), language: str = Query(..., enum=list(asr_manager.model_language.keys())), api_key: str = Depends(get_api_key)):
+    start_time = time()
+    all_transcriptions = []
+    try:
+        for file in files:
+            file_extension = file.filename.split(".")[-1].lower()
+            if file_extension not in ["wav", "mp3"]:
+                logger.warning(f"Unsupported file format: {file_extension}")
+                raise HTTPException(status_code=400, detail="Unsupported file format. Please upload WAV or MP3 files.")
+
+            file_content = await file.read()
+            audio = AudioSegment.from_mp3(io.BytesIO(file_content)) if file_extension == "mp3" else AudioSegment.from_wav(io.BytesIO(file_content))
+            if audio.frame_rate != 16000:
+                audio = audio.set_frame_rate(16000).set_channels(1)
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                audio.export(tmp_file.name, format="wav")
+                tmp_file_path = tmp_file.name
+
+            chunk_file_paths = asr_manager.split_audio(tmp_file_path)
+            try:
+                language_id = asr_manager.model_language.get(language, asr_manager.default_language)
+                transcription = asr_manager.transcribe(chunk_file_paths, language_id)
+                all_transcriptions.append(transcription)
+            finally:
+                for chunk_file_path in chunk_file_paths:
+                    if os.path.exists(chunk_file_path):
+                        os.remove(chunk_file_path)
+                if os.path.exists(tmp_file_path):
+                    os.remove(tmp_file_path)
+                asr_manager.cleanup()
+
+        logger.info(f"Batch transcription completed in {time() - start_time:.2f} seconds")
+        return JSONResponse(content={"transcriptions": all_transcriptions})
+    except Exception as e:
+        logger.error(f"Error during batch transcription: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Batch transcription failed: {str(e)}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the FastAPI server.")

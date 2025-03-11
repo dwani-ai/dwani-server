@@ -1,8 +1,8 @@
 import logging
 import logging.config
-from tts_config import config  # Import TTS config for log level
+from logging.handlers import RotatingFileHandler
+from tts_config import config
 
-# Logging configuration dictionary
 logging_config = {
     "version": 1,
     "disable_existing_loggers": False,
@@ -15,17 +15,21 @@ logging_config = {
             "formatter": "simple",
             "stream": "ext://sys.stdout",
         },
+        "file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "formatter": "simple",
+            "filename": "dhwani_api.log",
+            "maxBytes": 10 * 1024 * 1024,  # 10MB
+            "backupCount": 5,
+        },
     },
     "loggers": {
         "root": {
             "level": config.log_level.upper(),
-            "handlers": ["stdout"],
+            "handlers": ["stdout", "file"],
         },
     },
 }
 
-# Apply the logging configuration
 logging.config.dictConfig(logging_config)
-
-# Export the logger
 logger = logging.getLogger("indic_all_server")
