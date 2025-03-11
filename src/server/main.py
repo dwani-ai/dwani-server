@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     port: int = 7860
     chat_rate_limit: str = "100/minute"
     speech_rate_limit: str = "5/minute"
+    allowed_origins: str = "http://localhost:7860,https://gaganyatri-llm-indic-server-vlm.hf.space"
 
     @field_validator("chat_rate_limit", "speech_rate_limit")
     def validate_rate_limit(cls, v):
@@ -54,9 +55,14 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    #allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    #allow_methods=["*"],  # Allow all methods including OPTIONS
+    #allow_headers=["*"],  # Allow all headers
+    #allow_methods=["GET", "POST"],
+    #allow_headers=["X-API-Key", "Content-Type", "Accept"],
+    allow_origins=settings.allowed_origins.split(","),
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["X-API-Key", "Content-Type", "Accept"],
 )
 
@@ -145,7 +151,7 @@ def get_translate_manager(src_lang: str = Body(..., embed=True), tgt_lang: str =
 
 
 # Endpoints
-@app.get("/health")
+@app.get("/v1/health")
 async def health_check():
     return {"status": "healthy", "model": settings.llm_model_name}
 
@@ -155,7 +161,7 @@ async def home():
     return RedirectResponse(url="/docs")
 
 
-@app.post("/load_all_models")
+@app.post("/v1/load_all_models")
 async def load_all_models(api_key: str = Depends(get_api_key)):
     try:
         logger.info("Starting to load all models...")
@@ -202,7 +208,7 @@ async def generate_audio(
         raise HTTPException(status_code=500, detail=f"Audio generation failed: {str(e)}")
 
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/v1/chat", response_model=ChatResponse)
 @limiter.limit(settings.chat_rate_limit)
 async def chat(request: Request, chat_request: ChatRequest, api_key: str = Depends(get_api_key)):
     if not chat_request.prompt:
@@ -221,35 +227,35 @@ async def chat(request: Request, chat_request: ChatRequest, api_key: str = Depen
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 
-@app.post("/caption/")
+@app.post("/v1/caption/")
 async def caption_image(file: UploadFile = File(...), length: str = "normal"):
     image = Image.open(file.file)
     caption = vlm_manager.caption(image, length)
     return {"caption": caption}
 
 
-@app.post("/visual_query/")
+@app.post("/v1/visual_query/")
 async def visual_query(file: UploadFile = File(...), query: str = Body(...)):
     image = Image.open(file.file)
     answer = vlm_manager.query(image, query)
     return {"answer": answer}
 
 
-@app.post("/detect/")
+@app.post("/v1/detect/")
 async def detect_objects(file: UploadFile = File(...), object_type: str = "face"):
     image = Image.open(file.file)
     objects = vlm_manager.detect(image, object_type)
     return {"objects": objects}
 
 
-@app.post("/point/")
+@app.post("/v1/point/")
 async def point_objects(file: UploadFile = File(...), object_type: str = "person"):
     image = Image.open(file.file)
     points = vlm_manager.point(image, object_type)
     return {"points": points}
 
 
-@app.post("/transcribe/", response_model=TranscriptionResponse)
+@app.post("/v1/transcribe/", response_model=TranscriptionResponse)
 async def transcribe_audio(
     file: UploadFile = File(...),
     language: str = Query(..., enum=list(asr_manager.model_language.keys())),
@@ -295,7 +301,7 @@ async def transcribe_audio(
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 
-@app.post("/transcribe_batch/", response_model=BatchTranscriptionResponse)
+@app.post("/v1/transcribe_batch/", response_model=BatchTranscriptionResponse)
 async def transcribe_audio_batch(
     files: List[UploadFile] = File(...),
     language: str = Query(..., enum=list(asr_manager.model_language.keys())),
@@ -345,7 +351,7 @@ async def transcribe_audio_batch(
         raise HTTPException(status_code=500, detail=f"Batch transcription failed: {str(e)}")
 
 
-@app.post("/translate", response_model=TranslationResponse)
+@app.post("/v1/translate", response_model=TranslationResponse)
 async def translate(
     request: TranslationRequest, translate_manager: TranslateManager = Depends(get_translate_manager)
 ):
