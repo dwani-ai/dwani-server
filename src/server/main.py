@@ -14,6 +14,7 @@ import uvicorn
 from PIL import Image
 from typing import List
 from pydub import AudioSegment
+import os
 
 from config.logging_config import logger
 from config.tts_config import SPEED, ResponseFormat, config as tts_config
