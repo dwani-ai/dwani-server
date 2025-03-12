@@ -136,7 +136,8 @@ optuna==4.2.1
 orjson==3.10.15
 packaging==24.2
 pandas==2.2.3
-parler_tts @ git+https://github.com/huggingface/parler-tts.git@d108732cd57788ec86bc857d99a6cabd66663d68
+setuptools-rust
+parler_tts @ git+https://github.com/slabstech/parler-tts.git
 parso==0.8.4
 peft
 pexpect==4.9.0
@@ -236,7 +237,7 @@ torchaudio==2.6.0
 torchmetrics==1.6.1
 tqdm==4.67.1
 traitlets==5.14.3
-transformers
+#transformers
 triton==3.2.0
 typer==0.15.1
 typing_extensions==4.12.2
@@ -255,13 +256,17 @@ zope.event==5.0
 zope.interface==7.2
 zstandard==0.23.0
 
+transformers @ git+https://github.com/huggingface/transformers@v4.49.0-Gemma-3
 torch
-fastapi
-transformers
-pydantic_settings
-uvicorn
-pillow
-python-multipart
-pyvips
-einops
 accelerate
+bitsandbytes
+pillow
+uvicorn
+fastapi
+pydantic_settings
+slowapi
+python-multipart
+#qwen-vl-utils[decord]
+#torchvision
+#accelerate
+#autoawq

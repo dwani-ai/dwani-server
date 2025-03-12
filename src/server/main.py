@@ -4,7 +4,6 @@ import os
 from time import time
 from typing import List
 
-import soundfile as sf
 import tempfile
 import uvicorn
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Body
@@ -12,19 +11,45 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from PIL import Image
 from pydantic import BaseModel, field_validator
-from pydub import AudioSegment
 from pydantic_settings import BaseSettings
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+#
+import soundfile as sf
+from pydub import AudioSegment
+
+
+
 from config.logging_config import logger
 from config.tts_config import SPEED, ResponseFormat, config as tts_config
+
 from models.asr import ASRManager
-from models.llm import LLMManager
+#from models.llm import LLMManager
 from models.translate import TranslateManager
 from models.tts import TTSManager
-from models.vlm import VLMManager
+#from models.vlm import VLMManager
+
 from utils.auth import get_api_key, settings as auth_settings
+
+from transformers import AutoProcessor, Gemma3ForConditionalGeneration
+from PIL import Image
+import requests
+import torch
+from pydantic import BaseModel
+import base64
+from io import BytesIO
+from PIL import Image
+
+from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File, Form
+model_id_vlm = "google/gemma-3-4b-it"
+
+model_vlm = Gemma3ForConditionalGeneration.from_pretrained(
+    model_id_vlm, device_map="auto"
+).eval()
+
+processor = AutoProcessor.from_pretrained(model_id_vlm)
+
 
 
 class Settings(BaseSettings):
@@ -71,9 +96,9 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 
 # Initialize model managers with lazy loading
-llm_manager = LLMManager(settings.llm_model_name)
+#llm_manager = LLMManager(settings.llm_model_name)
 tts_manager = TTSManager()
-vlm_manager = VLMManager()
+#vlm_manager = VLMManager()
 asr_manager = ASRManager()
 translate_manager_eng_indic = TranslateManager("eng_Latn", "kan_Knda")
 translate_manager_indic_eng = TranslateManager("kan_Knda", "eng_Latn")
@@ -165,13 +190,13 @@ async def home():
 async def load_all_models(api_key: str = Depends(get_api_key)):
     try:
         logger.info("Starting to load all models...")
-        llm_manager.load()
+        #llm_manager.load()
         tts_manager.load_model(tts_config.model)
-        vlm_manager.load()
+        #vlm_manager.load()
         asr_manager.load()
         translate_manager_eng_indic.load()
         translate_manager_indic_eng.load()
-        translate_manager_indic_indic.load()
+        #translate_manager_indic_indic.load()
         logger.info("All models loaded successfully")
         return {"status": "success", "message": "All models loaded"}
     except Exception as e:
@@ -215,7 +240,47 @@ async def chat(request: Request, chat_request: ChatRequest, api_key: str = Depen
     try:
         translated_prompt = translate_manager_indic_eng.translate(chat_request.prompt)
         logger.info(f"Translated prompt to English: {translated_prompt}")
-        response = llm_manager.generate(translated_prompt, settings.max_tokens)
+
+
+        messages_vlm = [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "You are a helpful assistant."}]
+            },
+            {
+                "role": "user",
+                "content": []
+            }
+        ]
+
+        # Add text prompt to user content
+        messages_vlm[1]["content"].append({"type": "text", "text": translated_prompt})
+
+                # Process the chat template with the processor
+        inputs_vlm = processor.apply_chat_template(
+            messages_vlm,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt"
+        ).to(model_vlm.device, dtype=torch.bfloat16)
+
+        input_len = inputs_vlm["input_ids"].shape[-1]
+
+        # Generate response
+        with torch.inference_mode():
+            generation = model_vlm.generate(**inputs_vlm, max_new_tokens=100, do_sample=False)
+            generation = generation[0][input_len:]
+
+        # Decode the output
+        response = processor.decode(generation, skip_special_tokens=True)
+        logger.info(f"Chat Response: {response}")
+
+        #return ChatResponse(response=decoded)
+
+
+
+        #response = llm_manager.generate(translated_prompt, settings.max_tokens)
         logger.info(f"Generated English response: {response}")
         translated_response = translate_manager_eng_indic.translate(response)
         logger.info(f"Translated response to Kannada: {translated_response}")
@@ -224,20 +289,12 @@ async def chat(request: Request, chat_request: ChatRequest, api_key: str = Depen
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
-
+'''
 @app.post("/v1/caption/")
 async def caption_image(file: UploadFile = File(...), length: str = "normal"):
     image = Image.open(file.file)
     caption = vlm_manager.caption(image, length)
     return {"caption": caption}
-
-
-@app.post("/v1/visual_query/")
-async def visual_query(file: UploadFile = File(...), query: str = Body(...)):
-    image = Image.open(file.file)
-    answer = vlm_manager.query(image, query)
-    return {"answer": answer}
-
 
 @app.post("/v1/detect/")
 async def detect_objects(file: UploadFile = File(...), object_type: str = "face"):
@@ -251,6 +308,75 @@ async def point_objects(file: UploadFile = File(...), object_type: str = "person
     image = Image.open(file.file)
     points = vlm_manager.point(image, object_type)
     return {"points": points}
+
+'''
+@app.post("/v1/visual_query/")
+async def visual_query(image: UploadFile = File(...), query: str = Body(...)):
+    #image = Image.open(file.file)
+
+    try:
+        # Construct the message structure
+        messages_vlm = [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "You are a helpful assistant."}]
+            },
+            {
+                "role": "user",
+                "content": []
+            }
+        ]
+
+        # Add text prompt to user content
+        messages_vlm[1]["content"].append({"type": "text", "text": query})
+
+        # Handle image only if provided and valid
+        if image and image.file and image.size > 0:  # Check for valid file with content
+            # Read the image file
+            image_data = await image.read()
+            if not image_data:
+                raise HTTPException(status_code=400, detail="Uploaded image is empty")
+            # Open image with PIL for processing
+            img = Image.open(BytesIO(image_data))
+            # Add image to content (assuming processor accepts PIL images)
+            messages_vlm[1]["content"].insert(0, {"type": "image", "image": img})
+            logger.info(f"Received image: {image.filename}")
+        else:
+            if image and (not image.file or image.size == 0):
+                logger.warning("Received invalid or empty image parameter, treating as text-only")
+            logger.info("No valid image provided, processing text only")
+
+        # Process the chat template with the processor
+        inputs_vlm = processor.apply_chat_template(
+            messages_vlm,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt"
+        ).to(model_vlm.device, dtype=torch.bfloat16)
+
+        input_len = inputs_vlm["input_ids"].shape[-1]
+
+        # Generate response
+        with torch.inference_mode():
+            generation = model_vlm.generate(**inputs_vlm, max_new_tokens=100, do_sample=False)
+            generation = generation[0][input_len:]
+
+        # Decode the output
+        decoded = processor.decode(generation, skip_special_tokens=True)
+        logger.info(f"Chat Response: {decoded}")
+
+        #return ChatResponse(response=decoded)
+    
+        #answer = vlm_manager.query(image, query)
+        return {"answer": decoded}
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+
+
+
 
 
 @app.post("/v1/transcribe/", response_model=TranscriptionResponse)
@@ -363,6 +489,77 @@ async def translate(
         logger.error(f"Error during translation: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
 
+
+
+@app.post("/v1/chat_v2", response_model=ChatResponse)
+@limiter.limit(settings.chat_rate_limit)
+async def chat_v2(
+    request: Request,
+    prompt: str = Form(...),  # Text prompt as form data
+    image: UploadFile = File(default=None),  # Optional image file upload, defaults to None
+    api_key: str = Depends(get_api_key)
+):
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+    logger.info(f"Received prompt: {prompt}")
+
+    try:
+        # Construct the message structure
+        messages_vlm = [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "You are a helpful assistant."}]
+            },
+            {
+                "role": "user",
+                "content": []
+            }
+        ]
+
+        # Add text prompt to user content
+        messages_vlm[1]["content"].append({"type": "text", "text": prompt})
+
+        # Handle image only if provided and valid
+        if image and image.file and image.size > 0:  # Check for valid file with content
+            # Read the image file
+            image_data = await image.read()
+            if not image_data:
+                raise HTTPException(status_code=400, detail="Uploaded image is empty")
+            # Open image with PIL for processing
+            img = Image.open(BytesIO(image_data))
+            # Add image to content (assuming processor accepts PIL images)
+            messages_vlm[1]["content"].insert(0, {"type": "image", "image": img})
+            logger.info(f"Received image: {image.filename}")
+        else:
+            if image and (not image.file or image.size == 0):
+                logger.warning("Received invalid or empty image parameter, treating as text-only")
+            logger.info("No valid image provided, processing text only")
+
+        # Process the chat template with the processor
+        inputs_vlm = processor.apply_chat_template(
+            messages_vlm,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt"
+        ).to(model_vlm.device, dtype=torch.bfloat16)
+
+        input_len = inputs_vlm["input_ids"].shape[-1]
+
+        # Generate response
+        with torch.inference_mode():
+            generation = model_vlm.generate(**inputs_vlm, max_new_tokens=100, do_sample=False)
+            generation = generation[0][input_len:]
+
+        # Decode the output
+        decoded = processor.decode(generation, skip_special_tokens=True)
+        logger.info(f"Chat Response: {decoded}")
+
+        return ChatResponse(response=decoded)
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+        
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the FastAPI server.")
     parser.add_argument("--port", type=int, default=settings.port, help="Port to run the server on.")
