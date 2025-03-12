@@ -72,8 +72,6 @@ app.state.limiter = limiter
 
 # Initialize model managers with lazy loading
 llm_manager = LLMManager(settings.llm_model_name)
-trans_to_en = TranslateManager("kan_Knda", "eng_Latn")
-trans_to_kn = TranslateManager("eng_Latn", "kan_Knda")
 tts_manager = TTSManager()
 vlm_manager = VLMManager()
 asr_manager = ASRManager()
@@ -168,8 +166,6 @@ async def load_all_models(api_key: str = Depends(get_api_key)):
     try:
         logger.info("Starting to load all models...")
         llm_manager.load()
-        trans_to_en.load()
-        trans_to_kn.load()
         tts_manager.load_model(tts_config.model)
         vlm_manager.load()
         asr_manager.load()
@@ -217,11 +213,11 @@ async def chat(request: Request, chat_request: ChatRequest, api_key: str = Depen
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
     logger.info(f"Received prompt: {chat_request.prompt}")
     try:
-        translated_prompt = trans_to_en.translate(chat_request.prompt)
+        translated_prompt = translate_manager_indic_eng.translate(chat_request.prompt)
         logger.info(f"Translated prompt to English: {translated_prompt}")
         response = llm_manager.generate(translated_prompt, settings.max_tokens)
         logger.info(f"Generated English response: {response}")
-        translated_response = trans_to_kn.translate(response)
+        translated_response = translate_manager_eng_indic.translate(response)
         logger.info(f"Translated response to Kannada: {translated_response}")
         return ChatResponse(response=translated_response)
     except Exception as e:
