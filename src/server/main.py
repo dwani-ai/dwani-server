@@ -28,13 +28,13 @@ from utils.auth import get_api_key, settings as auth_settings
 
 
 class Settings(BaseSettings):
-    llm_model_name: str = "Qwen/Qwen2.5-3B-Instruct"
+    llm_model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
     max_tokens: int = 512
     host: str = "0.0.0.0"
     port: int = 7860
     chat_rate_limit: str = "100/minute"
     speech_rate_limit: str = "5/minute"
-    allowed_origins: str = "http://localhost:7860,https://gaganyatri-llm-indic-server-vlm.hf.space"
+    #allowed_origins: str = "http://localhost:7860,https://gaganyatri-llm-indic-server-vlm.hf.space"
 
     @field_validator("chat_rate_limit", "speech_rate_limit")
     def validate_rate_limit(cls, v):
@@ -52,18 +52,19 @@ app = FastAPI(
     title="Dhwani API",
     description="AI Chat API supporting Indian languages",
     version="1.0.0",
+    redirect_slashes=False,  
 )
 app.add_middleware(
     CORSMiddleware,
-    #allow_origins=["*"],
+    allow_origins=["*"],
     allow_credentials=False,
-    #allow_methods=["*"],  # Allow all methods including OPTIONS
-    #allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],  # Allow all methods including OPTIONS
+    allow_headers=["*"],  # Allow all headers
     #allow_methods=["GET", "POST"],
     #allow_headers=["X-API-Key", "Content-Type", "Accept"],
-    allow_origins=settings.allowed_origins.split(","),
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["X-API-Key", "Content-Type", "Accept"],
+    #allow_origins=settings.allowed_origins.split(","),
+    #allow_methods=["GET", "POST", "OPTIONS"],
+    #allow_headers=["X-API-Key", "Content-Type", "Accept"],
 )
 
 limiter = Limiter(key_func=get_remote_address)
@@ -136,7 +137,9 @@ class TranslationResponse(BaseModel):
 
 
 # Dependency for TranslateManager
-def get_translate_manager(src_lang: str = Body(..., embed=True), tgt_lang: str = Body(..., embed=True)):
+def get_translate_manager(request: TranslationRequest = Body(...)):
+    src_lang = request.src_lang
+    tgt_lang = request.tgt_lang
     if src_lang.startswith("eng") and not tgt_lang.startswith("eng"):
         return translate_manager_eng_indic
     elif not src_lang.startswith("eng") and tgt_lang.startswith("eng"):
@@ -148,7 +151,6 @@ def get_translate_manager(src_lang: str = Body(..., embed=True), tgt_lang: str =
             status_code=400,
             detail="Invalid language combination: English to English translation is not supported.",
         )
-
 
 # Endpoints
 @app.get("/v1/health")
@@ -260,7 +262,9 @@ async def transcribe_audio(
     file: UploadFile = File(...),
     language: str = Query(..., enum=list(asr_manager.model_language.keys())),
     api_key: str = Depends(get_api_key),
+    request: Request = None,  # Add for debugging
 ):
+    logger.info(f"Request method: {request.method}, Headers: {request.headers}, Query: {request.query_params}")
     start_time = time()
     try:
         file_extension = file.filename.split(".")[-1].lower()
@@ -299,7 +303,6 @@ async def transcribe_audio(
     except Exception as e:
         logger.error(f"Error during transcription: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
-
 
 @app.post("/v1/transcribe_batch/", response_model=BatchTranscriptionResponse)
 async def transcribe_audio_batch(
@@ -353,15 +356,16 @@ async def transcribe_audio_batch(
 
 @app.post("/v1/translate", response_model=TranslationResponse)
 async def translate(
-    request: TranslationRequest, translate_manager: TranslateManager = Depends(get_translate_manager)
+    request: TranslationRequest,
+    translate_manager: TranslateManager = Depends(get_translate_manager),
 ):
+    logger.info(f"Received request: {request}")
     try:
         translations = translate_manager.translate(request.sentences)
         return TranslationResponse(translations=translations)
     except Exception as e:
         logger.error(f"Error during translation: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the FastAPI server.")

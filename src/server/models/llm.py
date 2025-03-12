@@ -13,6 +13,7 @@ class LLMManager:
 
     def load(self):
         if not self.is_loaded:
+            
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
                 torch_dtype=self.torch_dtype,
