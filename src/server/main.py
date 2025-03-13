@@ -27,7 +27,7 @@ from config.tts_config import SPEED, ResponseFormat, config as tts_config
 #from models.asr import ASRManager
 from models.gemma_llm import LLMManager
 from models.translate import TranslateManager
-from models.tts import TTSManager
+#from models.tts import TTSManager
 #from models.vlm import VLMManager
 
 from utils.auth import get_api_key, settings as auth_settings
@@ -88,7 +88,7 @@ app.state.limiter = limiter
 
 # Initialize model managers with lazy loading
 llm_manager = LLMManager(settings.llm_model_name)
-tts_manager = TTSManager()
+#tts_manager = TTSManager()
 #vlm_manager = VLMManager()
 #asr_manager = ASRManager()
 translate_manager_eng_indic = TranslateManager("eng_Latn", "kan_Knda")
@@ -183,7 +183,7 @@ async def unload_all_models(api_key: str = Depends(get_api_key)):
         # vlm_manager.unload()
         # asr_manager.unload()
         llm_manager.unload()
-        tts_manager.unload()
+        #tts_manager.unload()
         translate_manager_eng_indic.unload()
         translate_manager_indic_eng.unload()
         translate_manager_indic_indic.unload()
@@ -199,7 +199,7 @@ async def load_all_models(api_key: str = Depends(get_api_key)):
         logger.info("Starting to load all models...")
         #llm_manager.load()
         #tts_manager.load_model(tts_config.model)
-        tts_manager.load_model(tts_config.model)
+        #tts_manager.load_model(tts_config.model)
         #vlm_manager.load()
         #asr_manager.load()
         translate_manager_eng_indic.load()
@@ -211,7 +211,69 @@ async def load_all_models(api_key: str = Depends(get_api_key)):
         logger.error(f"Error loading models: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to load models: {str(e)}")
 
+@app.post("/v1/audio/speech")
+@limiter.limit(settings.speech_rate_limit)
+async def generate_audio(
+    request: Request, 
+    speech_request: SpeechRequest = Body(...), 
+    api_key: str = Depends(get_api_key)
+):
+    if not speech_request.input.strip():
+        raise HTTPException(status_code=400, detail="Input cannot be empty")
+    
+    logger.info(f"Speech request: input={speech_request.input[:50]}..., voice={speech_request.voice}")
+    
+    try:
+        # Prepare the payload for the external API
+        payload = {
+            "input": speech_request.input,
+            "voice": speech_request.voice,
+            "model": speech_request.model,
+            "response_format": speech_request.response_format.value,
+            "speed": speech_request.speed
+        }
+        
+        # External API endpoint
+        external_url = "https://gaganyatri-tts-indic-server.hf.space/v1/audio/speech"
+        
+        # Send POST request to the external TTS API
+        response = requests.post(
+            external_url,
+            json=payload,
+            headers={
+                "accept": "application/json",
+                "Content-Type": "application/json"
+            },
+            stream=True  # Enable streaming to handle large audio responses efficiently
+        )
+        
+        # Check if the external API request was successful
+        if response.status_code != 200:
+            logger.error(f"External TTS API error: {response.status_code} - {response.text}")
+            raise HTTPException(
+                status_code=response.status_code, 
+                detail=f"External TTS API error: {response.text}"
+            )
+        
+        # Stream the audio response back to the client
+        headers = {
+            "Content-Disposition": f"inline; filename=\"speech.{speech_request.response_format.value}\"",
+            "Cache-Control": "no-cache",
+            "Content-Type": f"audio/{speech_request.response_format.value}"
+        }
+        
+        return StreamingResponse(
+            response.iter_content(chunk_size=8192),  # Stream in chunks
+            media_type=f"audio/{speech_request.response_format.value}",
+            headers=headers
+        )
+    
+    except Exception as e:
+        logger.error(f"Error generating audio via external API: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Audio generation failed: {str(e)}")
 
+
+'''
 @app.post("/v1/audio/speech")
 @limiter.limit(settings.speech_rate_limit)
 async def generate_audio(
@@ -238,7 +300,7 @@ async def generate_audio(
         logger.error(f"Error generating audio: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Audio generation failed: {str(e)}")
 
-
+'''
 @app.post("/v1/chat", response_model=ChatResponse)
 @limiter.limit(settings.chat_rate_limit)
 async def chat(request: Request, chat_request: ChatRequest, api_key: str = Depends(get_api_key)):
