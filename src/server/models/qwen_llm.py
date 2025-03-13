@@ -11,6 +11,17 @@ class LLMManager:
         self.tokenizer = None
         self.is_loaded = False
 
+    def unload(self):
+        if self.is_loaded:
+            # Delete the model and processor to free memory
+            del self.model
+            del self.processor
+            # If using CUDA, clear the cache to free GPU memory
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            self.is_loaded = False
+            logger.info(f"LLM {self.model_name} unloaded from {self.device}")
+    
     def load(self):
         if not self.is_loaded:
             

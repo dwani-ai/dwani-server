@@ -43,6 +43,16 @@ class ASRManager:
             "ur": "ai4bharat/indicconformer_stt_ur_hybrid_rnnt_large"
         }
 
+    def unload(self):
+        if self.is_loaded:
+            # Delete the model and processor to free memory
+            del self.model
+            del self.processor
+            # If using CUDA, clear the cache to free GPU memory
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            self.is_loaded = False
+            logger.info(f"LLM {self.model_name} unloaded from {self.device}")
     def load(self, language_id: str = None):
         if not self.is_loaded or (language_id and language_id != self.default_language):
             model_name = self.config_models.get(language_id or self.default_language, self.config_models["kn"])

@@ -24,15 +24,14 @@ from pydub import AudioSegment
 from config.logging_config import logger
 from config.tts_config import SPEED, ResponseFormat, config as tts_config
 
-from models.asr import ASRManager
-#from models.llm import LLMManager
+#from models.asr import ASRManager
+from models.gemma_llm import LLMManager
 from models.translate import TranslateManager
 from models.tts import TTSManager
 #from models.vlm import VLMManager
 
 from utils.auth import get_api_key, settings as auth_settings
 
-from transformers import AutoProcessor, Gemma3ForConditionalGeneration
 from PIL import Image
 import requests
 import torch
@@ -42,18 +41,10 @@ from io import BytesIO
 from PIL import Image
 
 from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File, Form
-model_id_vlm = "google/gemma-3-4b-it"
-
-model_vlm = Gemma3ForConditionalGeneration.from_pretrained(
-    model_id_vlm, device_map="auto"
-).eval()
-
-processor = AutoProcessor.from_pretrained(model_id_vlm)
-
 
 
 class Settings(BaseSettings):
-    llm_model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
+    llm_model_name: str = "google/gemma-3-4b-it"
     max_tokens: int = 512
     host: str = "0.0.0.0"
     port: int = 7860
@@ -96,10 +87,10 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 
 # Initialize model managers with lazy loading
-#llm_manager = LLMManager(settings.llm_model_name)
+llm_manager = LLMManager(settings.llm_model_name)
 tts_manager = TTSManager()
 #vlm_manager = VLMManager()
-asr_manager = ASRManager()
+#asr_manager = ASRManager()
 translate_manager_eng_indic = TranslateManager("eng_Latn", "kan_Knda")
 translate_manager_indic_eng = TranslateManager("kan_Knda", "eng_Latn")
 translate_manager_indic_indic = TranslateManager("kan_Knda", "hin_Deva")
@@ -185,15 +176,32 @@ async def health_check():
 async def home():
     return RedirectResponse(url="/docs")
 
+@app.post("/v1/unload_all_models")
+async def unload_all_models(api_key: str = Depends(get_api_key)):
+    try:
+        logger.info("Starting to unload all models...")
+        # vlm_manager.unload()
+        # asr_manager.unload()
+        llm_manager.unload()
+        tts_manager.unload()
+        translate_manager_eng_indic.unload()
+        translate_manager_indic_eng.unload()
+        translate_manager_indic_indic.unload()
+        logger.info("All models unloaded successfully")
+        return {"status": "success", "message": "All models unloaded"}
+    except Exception as e:
+        logger.error(f"Error unloading models: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to unload models: {str(e)}")
 
 @app.post("/v1/load_all_models")
 async def load_all_models(api_key: str = Depends(get_api_key)):
     try:
         logger.info("Starting to load all models...")
         #llm_manager.load()
-        tts_manager.load_model(tts_config.model)
+        #tts_manager.load_model(tts_config.model)
+        tts_manager.load_model(tts_config.model, compile_mode="reduce-overhead")
         #vlm_manager.load()
-        asr_manager.load()
+        #asr_manager.load()
         translate_manager_eng_indic.load()
         translate_manager_indic_eng.load()
         #translate_manager_indic_indic.load()
@@ -242,45 +250,7 @@ async def chat(request: Request, chat_request: ChatRequest, api_key: str = Depen
         logger.info(f"Translated prompt to English: {translated_prompt}")
 
 
-        messages_vlm = [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": "You are a helpful assistant."}]
-            },
-            {
-                "role": "user",
-                "content": []
-            }
-        ]
-
-        # Add text prompt to user content
-        messages_vlm[1]["content"].append({"type": "text", "text": translated_prompt})
-
-                # Process the chat template with the processor
-        inputs_vlm = processor.apply_chat_template(
-            messages_vlm,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt"
-        ).to(model_vlm.device, dtype=torch.bfloat16)
-
-        input_len = inputs_vlm["input_ids"].shape[-1]
-
-        # Generate response
-        with torch.inference_mode():
-            generation = model_vlm.generate(**inputs_vlm, max_new_tokens=100, do_sample=False)
-            generation = generation[0][input_len:]
-
-        # Decode the output
-        response = processor.decode(generation, skip_special_tokens=True)
-        logger.info(f"Chat Response: {response}")
-
-        #return ChatResponse(response=decoded)
-
-
-
-        #response = llm_manager.generate(translated_prompt, settings.max_tokens)
+        response = await llm_manager.generate(translated_prompt, settings.max_tokens)
         logger.info(f"Generated English response: {response}")
         translated_response = translate_manager_eng_indic.translate(response)
         logger.info(f"Translated response to Kannada: {translated_response}")
@@ -316,67 +286,15 @@ async def visual_query(image: UploadFile = File(...), query: str = Body(...)):
 
     try:
         # Construct the message structure
-        messages_vlm = [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": "You are a helpful assistant."}]
-            },
-            {
-                "role": "user",
-                "content": []
-            }
-        ]
-
-        # Add text prompt to user content
-        messages_vlm[1]["content"].append({"type": "text", "text": query})
-
-        # Handle image only if provided and valid
-        if image and image.file and image.size > 0:  # Check for valid file with content
-            # Read the image file
-            image_data = await image.read()
-            if not image_data:
-                raise HTTPException(status_code=400, detail="Uploaded image is empty")
-            # Open image with PIL for processing
-            img = Image.open(BytesIO(image_data))
-            # Add image to content (assuming processor accepts PIL images)
-            messages_vlm[1]["content"].insert(0, {"type": "image", "image": img})
-            logger.info(f"Received image: {image.filename}")
-        else:
-            if image and (not image.file or image.size == 0):
-                logger.warning("Received invalid or empty image parameter, treating as text-only")
-            logger.info("No valid image provided, processing text only")
-
-        # Process the chat template with the processor
-        inputs_vlm = processor.apply_chat_template(
-            messages_vlm,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt"
-        ).to(model_vlm.device, dtype=torch.bfloat16)
-
-        input_len = inputs_vlm["input_ids"].shape[-1]
-
-        # Generate response
-        with torch.inference_mode():
-            generation = model_vlm.generate(**inputs_vlm, max_new_tokens=100, do_sample=False)
-            generation = generation[0][input_len:]
-
-        # Decode the output
-        decoded = processor.decode(generation, skip_special_tokens=True)
-        logger.info(f"Chat Response: {decoded}")
-
-        #return ChatResponse(response=decoded)
-    
-        #answer = vlm_manager.query(image, query)
-        return {"answer": decoded}
+        answer = await llm_manager.vision_query(image, query)
+        return {"answer": answer}
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 
 
-
+'''
 
 
 @app.post("/v1/transcribe/", response_model=TranscriptionResponse)
@@ -474,7 +392,7 @@ async def transcribe_audio_batch(
     except Exception as e:
         logger.error(f"Error during batch transcription: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Batch transcription failed: {str(e)}")
-
+'''
 
 @app.post("/v1/translate", response_model=TranslationResponse)
 async def translate(
@@ -504,57 +422,7 @@ async def chat_v2(
     logger.info(f"Received prompt: {prompt}")
 
     try:
-        # Construct the message structure
-        messages_vlm = [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": "You are a helpful assistant."}]
-            },
-            {
-                "role": "user",
-                "content": []
-            }
-        ]
-
-        # Add text prompt to user content
-        messages_vlm[1]["content"].append({"type": "text", "text": prompt})
-
-        # Handle image only if provided and valid
-        if image and image.file and image.size > 0:  # Check for valid file with content
-            # Read the image file
-            image_data = await image.read()
-            if not image_data:
-                raise HTTPException(status_code=400, detail="Uploaded image is empty")
-            # Open image with PIL for processing
-            img = Image.open(BytesIO(image_data))
-            # Add image to content (assuming processor accepts PIL images)
-            messages_vlm[1]["content"].insert(0, {"type": "image", "image": img})
-            logger.info(f"Received image: {image.filename}")
-        else:
-            if image and (not image.file or image.size == 0):
-                logger.warning("Received invalid or empty image parameter, treating as text-only")
-            logger.info("No valid image provided, processing text only")
-
-        # Process the chat template with the processor
-        inputs_vlm = processor.apply_chat_template(
-            messages_vlm,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt"
-        ).to(model_vlm.device, dtype=torch.bfloat16)
-
-        input_len = inputs_vlm["input_ids"].shape[-1]
-
-        # Generate response
-        with torch.inference_mode():
-            generation = model_vlm.generate(**inputs_vlm, max_new_tokens=100, do_sample=False)
-            generation = generation[0][input_len:]
-
-        # Decode the output
-        decoded = processor.decode(generation, skip_special_tokens=True)
-        logger.info(f"Chat Response: {decoded}")
-
+        decoded = await llm_manager.chat_v2(image, prompt)
         return ChatResponse(response=decoded)
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
