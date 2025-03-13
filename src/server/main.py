@@ -293,6 +293,40 @@ async def visual_query(image: UploadFile = File(...), query: str = Body(...)):
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 
+@app.post("/v1/transcribe/", response_model=TranscriptionResponse)
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    language: str = Query(..., enum=["kannada", "hindi", "tamil"]),  # Adjust supported languages as needed
+    api_key: str = Depends(get_api_key),
+    request: Request = None,
+):
+    logger.info(f"Request method: {request.method}, Headers: {request.headers}, Query: {request.query_params}")
+    start_time = time()
+    try:
+        # Prepare the file for the external request
+        file_content = await file.read()
+        files = {"file": (file.filename, file_content, file.content_type)}
+
+        # Reroute to the external server
+        external_url = f"https://gaganyatri-asr-indic-server-cpu.hf.space/transcribe/?language={language}"
+        response = requests.post(
+            external_url,
+            files=files,
+            headers={"accept": "application/json"}
+        )
+
+        if response.status_code != 200:
+            logger.error(f"External server error: {response.status_code} - {response.text}")
+            raise HTTPException(status_code=response.status_code, detail=f"External server error: {response.text}")
+
+        transcription = response.json().get("text", "")
+        logger.info(f"Transcription completed in {time() - start_time:.2f} seconds")
+        return JSONResponse(content={"text": transcription})
+
+    except Exception as e:
+        logger.error(f"Error during transcription rerouting: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
 
 '''
 
