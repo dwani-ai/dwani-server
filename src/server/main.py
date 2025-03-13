@@ -199,7 +199,7 @@ async def load_all_models(api_key: str = Depends(get_api_key)):
         logger.info("Starting to load all models...")
         #llm_manager.load()
         #tts_manager.load_model(tts_config.model)
-        tts_manager.load_model(tts_config.model, compile_mode="reduce-overhead")
+        tts_manager.load_model(tts_config.model)
         #vlm_manager.load()
         #asr_manager.load()
         translate_manager_eng_indic.load()
