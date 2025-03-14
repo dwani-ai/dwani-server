@@ -46,7 +46,7 @@ class LLMManager:
         messages_vlm = [
             {
                 "role": "system",
-                "content": [{"type": "text", "text": "You are Dhwani, a helpful assistant. Provide a concise response in one sentence maximum."}]
+                "content": [{"type": "text", "text": "You are Dhwani, a helpful assistant. Answer questions considering India as base country and karnataka as base state, Provide a concise response in one sentence maximum."}]
             },
             {
                 "role": "user",
@@ -85,7 +85,7 @@ class LLMManager:
         messages_vlm = [
             {
                 "role": "system",
-                "content": [{"type": "text", "text": "You are a helpful assistant."}]
+                "content": [{"type": "text", "text": "You are Dhwani, a helpful assistant. Answer questions considering India as base country and karnataka as base state"}]
             },
             {
                 "role": "user",
@@ -96,32 +96,26 @@ class LLMManager:
         # Add text prompt to user content
         messages_vlm[1]["content"].append({"type": "text", "text": query})
 
-        # Handle image only if provided and valid
-        if image and image.file and image.size > 0:  # Check for valid file with content
-            # Read the image file
-            image_data = await image.read() 
-            #image_data = image.read()
-
-            if not image_data:
-                raise HTTPException(status_code=400, detail="Uploaded image is empty")
-            # Open image with PIL for processing
-            img = Image.open(BytesIO(image_data))
-            # Add image to content (assuming processor accepts PIL images)
-            messages_vlm[1]["content"].insert(0, {"type": "image", "image": img})
-            logger.info(f"Received image: {image.filename}")
+        # Handle image if provided and valid
+        if image and image.size[0] > 0 and image.size[1] > 0:  # Check for valid dimensions
+            # Image is already a PIL Image, no need to read or reopen
+            messages_vlm[1]["content"].insert(0, {"type": "image", "image": image})
+            logger.info(f"Received valid image for processing")
         else:
-            if image and (not image.file or image.size == 0):
-                logger.warning("Received invalid or empty image parameter, treating as text-only")
             logger.info("No valid image provided, processing text only")
 
         # Process the chat template with the processor
-        inputs_vlm = self.processor.apply_chat_template(
-            messages_vlm,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt"
-        ).to(self.model.device, dtype=torch.bfloat16)
+        try:
+            inputs_vlm = self.processor.apply_chat_template(
+                messages_vlm,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt"
+            ).to(self.model.device, dtype=torch.bfloat16)
+        except Exception as e:
+            logger.error(f"Error in apply_chat_template: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to process input: {str(e)}")
 
         input_len = inputs_vlm["input_ids"].shape[-1]
 
@@ -134,9 +128,6 @@ class LLMManager:
         decoded = self.processor.decode(generation, skip_special_tokens=True)
         logger.info(f"Chat Response: {decoded}")
 
-        #return ChatResponse(response=decoded)
-    
-
         return decoded
     
     async def chat_v2(self, image: Image.Image, query: str) -> str:
@@ -146,7 +137,7 @@ class LLMManager:
         messages_vlm = [
             {
                 "role": "system",
-                "content": [{"type": "text", "text": "You are a helpful assistant."}]
+                "content": [{"type": "text", "text": "You are Dhwani, a helpful assistant. Answer questions considering India as base country and karnataka as base state"}]
             },
             {
                 "role": "user",

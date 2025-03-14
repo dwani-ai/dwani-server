@@ -343,17 +343,20 @@ async def point_objects(file: UploadFile = File(...), object_type: str = "person
 
 '''
 @app.post("/v1/visual_query/")
-async def visual_query(image: UploadFile = File(...), query: str = Body(...)):
-    #image = Image.open(file.file)
-
+async def visual_query(file: UploadFile = File(...), query: str = Body(...)):
     try:
-        # Construct the message structure
+        # Open the uploaded file as a PIL Image
+        image = Image.open(file.file)
+        # Ensure the image is valid
+        if image.size == (0, 0):
+            raise HTTPException(status_code=400, detail="Uploaded image is empty or invalid")
+        
+        # Call vision_query with the PIL Image
         answer = await llm_manager.vision_query(image, query)
         return {"answer": answer}
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
-
 
 @app.post("/v1/transcribe/", response_model=TranscriptionResponse)
 async def transcribe_audio(
