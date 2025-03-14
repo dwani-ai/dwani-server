@@ -211,6 +211,81 @@ async def load_all_models(api_key: str = Depends(get_api_key)):
         logger.error(f"Error loading models: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to load models: {str(e)}")
 
+
+from transformers import AutoModel
+import numpy as np
+import soundfile as sf
+
+
+# Load the IndicF5 model once at startup
+repo_id = "ai4bharat/IndicF5"
+model = AutoModel.from_pretrained(repo_id, trust_remote_code=True)
+
+import os  # Ensure this is imported at the top of your file
+
+class SpeechRequest(BaseModel):
+    text: str
+    ref_audio_path: str = "kannada_female_voice.wav"  # Default reference audio path
+    response_format: str = "mp3"
+
+    @classmethod
+    def validate_text(cls, v):
+        if not v.strip():
+            raise ValueError("Text cannot be empty")
+        if len(v) > 1000:
+            raise ValueError("Text cannot exceed 1000 characters")
+        return v.strip()
+
+    @classmethod
+    def validate_ref_audio_path(cls, v):
+        if not v.endswith(".wav"):
+            raise ValueError("Reference audio must be a WAV file")
+        if not os.path.exists(v):  # Fixed from io.os.path.exists to os.path.exists
+            raise ValueError(f"Reference audio file {v} not found")
+        return v
+
+# TTS generation endpoint
+@app.post("/v1/audio/speech_v2")
+async def generate_speech(request: SpeechRequest = Body(...)):
+    try:
+        # Generate speech using the IndicF5 model
+        audio = model(
+            request.text,
+            ref_audio_path=request.ref_audio_path,
+            ref_text="ರಾಮ ರಾಮಾಯಣದ ನಾಯಕ. ರಾಮನನ್ನು ದೇವರ ಅವತಾರವೆಂದು ಚಿತ್ರಿಸಲಾಗಿದೆ. ರಾಮನು ಅಯೋಧ್ಯೆಯ ಸೂರ್ಯ ವಂಶದ ರಾಜನಾದ ದಶರಥನ ಹಿರಿಯ ಮಗ"
+        )
+
+        # Normalize audio if necessary
+        if audio.dtype == np.int16:
+            audio = audio.astype(np.float32) / 32768.0
+        elif audio.dtype != np.float32:
+            audio = audio.astype(np.float32)
+
+        # Write audio to a temporary WAV buffer
+        wav_buffer = io.BytesIO()
+        sf.write(wav_buffer, np.array(audio, dtype=np.float32), samplerate=24000)
+        wav_buffer.seek(0)
+
+        # Convert WAV to MP3 using pydub
+        audio_segment = AudioSegment.from_wav(wav_buffer)
+        mp3_buffer = io.BytesIO()
+        audio_segment.export(mp3_buffer, format="mp3")
+        mp3_buffer.seek(0)
+
+        # Stream the MP3 response
+        headers = {
+            "Content-Disposition": "inline; filename=\"speech.mp3\"",
+            "Cache-Control": "no-cache",
+        }
+        return StreamingResponse(
+            mp3_buffer,
+            media_type="audio/mp3",
+            headers=headers
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Speech generation failed: {str(e)}")
+
 @app.post("/v1/audio/speech")
 @limiter.limit(settings.speech_rate_limit)
 async def generate_audio(
