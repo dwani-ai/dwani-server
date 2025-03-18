@@ -192,7 +192,7 @@ async def chat(request: Request, chat_request: ChatRequest):
     try:
 
         # Call the external API instead of llm_manager.generate
-        external_url = "https://gaganyatri-dhwani-internal-api-server.hf.space/v1/chat"
+        external_url = "https://slabstech-dhwani-internal-api-server.hf.space/v1/chat"
         payload = {
             "prompt": chat_request.prompt ,
             "src_lang": chat_request.src_lang,  
@@ -305,7 +305,7 @@ async def translate(request: TranslationRequest):
     logger.info(f"Received translation request: {request.dict()}")
     
     # External API endpoint
-    external_url = f"https://gaganyatri-dhwani-internal-api-server.hf.space/translate?src_lang={request.src_lang}&tgt_lang={request.tgt_lang}"
+    external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/translate?src_lang={request.src_lang}&tgt_lang={request.tgt_lang}"
     
     # Prepare the payload matching the external API's expected format
     payload = {
