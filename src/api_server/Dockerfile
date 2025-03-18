@@ -31,4 +31,4 @@ HEALTHCHECK --interval=30s --timeout=3s \
   CMD curl -f http://localhost:7860/v1/health || exit 1
 
 # Command to run the application with configurable host/port
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["python", "/app/src/server/main.py", "--host", "0.0.0.0", "--port", "7860"]

@@ -18,7 +18,7 @@ from PIL import Image
 # Assuming these are in your project structure
 from config.tts_config import SPEED, ResponseFormat, config as tts_config
 from config.logging_config import logger
-from utils.auth import get_api_key
+#from utils.auth import get_api_key
 
 # Configuration settings
 class Settings(BaseSettings):
@@ -108,7 +108,7 @@ class ExternalTTSService(TTSService):
                 json=payload,
                 headers={"accept": "application/json", "Content-Type": "application/json"},
                 stream=True,
-                timeout=10
+                timeout=60
             )
         except requests.Timeout:
             raise HTTPException(status_code=504, detail="External TTS API timeout")
@@ -132,7 +132,7 @@ async def home():
 async def generate_audio(
     request: Request,
     speech_request: SpeechRequest = Depends(),
-    api_key: str = Depends(get_api_key),
+    #api_key: str = Depends(get_api_key),
     tts_service: TTSService = Depends(get_tts_service)
 ):
     if not speech_request.input.strip():
@@ -167,81 +167,65 @@ async def generate_audio(
         headers=headers
     )
 
-@app.post("/v1/generate_text/", response_model=TextGenerationResponse)
-@limiter.limit(settings.chat_rate_limit)
-async def generate_text(
-    file: UploadFile = File(...),
-    language: str = Query(..., enum=["kannada", "hindi", "tamil"]),
-    api_key: str = Depends(get_api_key),
-    request: Request = None,
-):
-    logger.info("Processing text generation request", extra={
-        "endpoint": "/v1/generate_text",
-        "filename": file.filename,
-        "client_ip": get_remote_address(request)
-    })
-    
-    start_time = time()
-    try:
-        file_content = await file.read()
-        files = {"file": (file.filename, file_content, file.content_type)}
-        
-        external_url = f"{settings.external_text_gen_url}/generate_text/?language={language}"
-        response = requests.post(
-            external_url,
-            files=files,
-            headers={"accept": "application/json"},
-            timeout=10
-        )
-        response.raise_for_status()
-        
-        generated_text = response.json().get("text", "")
-        logger.info(f"Text generation completed in {time() - start_time:.2f} seconds")
-        return TextGenerationResponse(text=generated_text)
-    
-    except requests.Timeout:
-        raise HTTPException(status_code=504, detail="Text generation service timeout")
-    except requests.RequestException as e:
-        logger.error(f"Text generation request failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Text generation failed: {str(e)}")
 
-@app.post("/v1/process_audio/", response_model=AudioProcessingResponse)
+class ChatRequest(BaseModel):
+    prompt: str
+    src_lang: str = "kan_Knda"  # Default to Kannada
+
+    @field_validator("prompt")
+    def prompt_must_be_valid(cls, v):
+        if len(v) > 1000:
+            raise ValueError("Prompt cannot exceed 1000 characters")
+        return v.strip()
+
+class ChatResponse(BaseModel):
+    response: str
+
+
+@app.post("/v1/chat", response_model=ChatResponse)
 @limiter.limit(settings.chat_rate_limit)
-async def process_audio(
-    file: UploadFile = File(...),
-    language: str = Query(..., enum=["kannada", "hindi", "tamil"]),
-    api_key: str = Depends(get_api_key),
-    request: Request = None,
-):
-    logger.info("Processing audio processing request", extra={
-        "endpoint": "/v1/process_audio",
-        "filename": file.filename,
-        "client_ip": get_remote_address(request)
-    })
+async def chat(request: Request, chat_request: ChatRequest):
+    if not chat_request.prompt:
+        raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+    logger.info(f"Received prompt: {chat_request.prompt}, src_lang: {chat_request.src_lang}")
     
-    start_time = time()
     try:
-        file_content = await file.read()
-        files = {"file": (file.filename, file_content, file.content_type)}
+
+        # Call the external API instead of llm_manager.generate
+        external_url = "https://gaganyatri-dhwani-internal-api-server.hf.space/v1/chat"
+        payload = {
+            "prompt": chat_request.prompt ,
+            "src_lang": chat_request.src_lang,  
+            "tgt_lang" : chat_request.src_lang
+        }
         
-        external_url = f"{settings.external_audio_proc_url}/process_audio/?language={language}"
         response = requests.post(
             external_url,
-            files=files,
-            headers={"accept": "application/json"},
-            timeout=10
+            json=payload,
+            headers={
+                "accept": "application/json",
+                "Content-Type": "application/json"
+            },
+            timeout=60
         )
-        response.raise_for_status()
+        response.raise_for_status()  # Raise an exception for bad status codes
         
-        processed_result = response.json().get("result", "")
-        logger.info(f"Audio processing completed in {time() - start_time:.2f} seconds")
-        return AudioProcessingResponse(result=processed_result)
+        # Extract the response text from the API
+        response_data = response.json()
+        response = response_data.get("response", "")
+        logger.info(f"Generated Chat response from external API: {response}")
+
+        return ChatResponse(response=response)
     
     except requests.Timeout:
-        raise HTTPException(status_code=504, detail="Audio processing service timeout")
+        logger.error("External chat API request timed out")
+        raise HTTPException(status_code=504, detail="Chat service timeout")
     except requests.RequestException as e:
-        logger.error(f"Audio processing request failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Audio processing failed: {str(e)}")
+        logger.error(f"Error calling external chat API: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 @app.post("/v1/transcribe/", response_model=TranscriptionResponse)
 async def transcribe_audio(
@@ -267,7 +251,7 @@ async def transcribe_audio(
             external_url,
             files=files,
             headers={"accept": "application/json"},
-            timeout=10
+            timeout=60
         )
         response.raise_for_status()
         
@@ -287,7 +271,7 @@ async def chat_v2(
     request: Request,
     prompt: str = Form(...),
     image: UploadFile = File(default=None),
-    api_key: str = Depends(get_api_key)
+    #api_key: str = Depends(get_api_key)
 ):
     if not prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
@@ -307,6 +291,66 @@ async def chat_v2(
     except Exception as e:
         logger.error(f"Chat_v2 processing failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    
+class TranslationRequest(BaseModel):
+    sentences: list[str]
+    src_lang: str
+    tgt_lang: str
+
+class TranslationResponse(BaseModel):
+    translations: list[str]
+
+@app.post("/v1/translate", response_model=TranslationResponse)
+async def translate(request: TranslationRequest):
+    logger.info(f"Received translation request: {request.dict()}")
+    
+    # External API endpoint
+    external_url = f"https://gaganyatri-dhwani-internal-api-server.hf.space/translate?src_lang={request.src_lang}&tgt_lang={request.tgt_lang}"
+    
+    # Prepare the payload matching the external API's expected format
+    payload = {
+        "sentences": request.sentences,
+        "src_lang": request.src_lang,
+        "tgt_lang": request.tgt_lang
+    }
+    
+    try:
+        # Make the POST request to the external API
+        response = requests.post(
+            external_url,
+            json=payload,
+            headers={
+                "accept": "application/json",
+                "Content-Type": "application/json"
+            },
+            timeout=60  # Set a timeout to avoid hanging
+        )
+        
+        # Raise an exception for bad status codes (4xx, 5xx)
+        response.raise_for_status()
+        
+        # Extract translations from the response
+        response_data = response.json()
+        translations = response_data.get("translations", [])
+        
+        if not translations or len(translations) != len(request.sentences):
+            logger.warning(f"Unexpected response format: {response_data}")
+            raise HTTPException(status_code=500, detail="Invalid response from translation service")
+        
+        logger.info(f"Translation successful: {translations}")
+        return TranslationResponse(translations=translations)
+    
+    except requests.Timeout:
+        logger.error("Translation request timed out")
+        raise HTTPException(status_code=504, detail="Translation service timeout")
+    except requests.RequestException as e:
+        logger.error(f"Error during translation: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
+    except ValueError as e:
+        logger.error(f"Invalid JSON response: {str(e)}")
+        raise HTTPException(status_code=500, detail="Invalid response format from translation service")
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the FastAPI server.")
