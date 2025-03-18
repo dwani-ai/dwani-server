@@ -29,18 +29,19 @@ app = FastAPI(
     title="Dhwani API",
     description="A multilingual AI-powered API supporting Indian languages for chat, text-to-speech, audio processing, and transcription. "
                 "**Authentication Guide:** \n"
-                "1. Register a new user via `/v1/register` with a POST request containing `username` and `password` (requires admin access). \n"
-                "2. Obtain an access token by sending a POST request to `/v1/token` with `username` and `password`. \n"
-                "3. Click the 'Authorize' button (top-right), enter your access token (e.g., `your_access_token`) in the 'bearerAuth' field, and click 'Authorize'. \n"
-                "All protected endpoints require this token for access. Only the 'admin' user (default password: adminpass) can register new users.",
+                #"1. Register a new user via `/v1/register` with a POST request containing `username` and `password` (requires admin access). \n"
+                "1. Obtain an access token by sending a POST request to `/v1/token` with `username` and `password`. \n"
+                "2. Click the 'Authorize' button (top-right), enter your access token (e.g., `your_access_token`) in the 'bearerAuth' field, and click 'Authorize'. \n"
+                "All protected endpoints require this token for access. \n"
+                #"Only the 'admin' user (default password: adminpass) can register new users.",
     version="1.0.0",
     redirect_slashes=False,
     openapi_tags=[
-        {"name": "Utility", "description": "General utility endpoints"},
-        {"name": "Authentication", "description": "User authentication and registration"},
         {"name": "Chat", "description": "Chat-related endpoints"},
         {"name": "Audio", "description": "Audio processing and TTS endpoints"},
-        {"name": "Translation", "description": "Text translation endpoints"}
+        {"name": "Translation", "description": "Text translation endpoints"},
+        {"name": "Authentication", "description": "User authentication and registration"},
+        {"name": "Utility", "description": "General utility endpoints"},
     ],
 )
 
