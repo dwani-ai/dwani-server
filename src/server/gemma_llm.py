@@ -103,7 +103,7 @@ class LLMManager:
         messages_vlm = [
             {
                 "role": "system",
-                "content": [{"type": "text", "text": "You are Dhwani, a helpful assistant. Summarize your answer in max 2 lines."}]
+                "content": [{"type": "text", "text": "You are Dhwani, a helpful assistant. Summarize your answer in one sentence maximum."}]
             },
             {
                 "role": "user",

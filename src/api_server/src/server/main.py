@@ -29,11 +29,9 @@ app = FastAPI(
     title="Dhwani API",
     description="A multilingual AI-powered API supporting Indian languages for chat, text-to-speech, audio processing, and transcription. "
                 "**Authentication Guide:** \n"
-                #"1. Register a new user via `/v1/register` with a POST request containing `username` and `password` (requires admin access). \n"
                 "1. Obtain an access token by sending a POST request to `/v1/token` with `username` and `password`. \n"
                 "2. Click the 'Authorize' button (top-right), enter your access token (e.g., `your_access_token`) in the 'bearerAuth' field, and click 'Authorize'. \n"
-                "All protected endpoints require this token for access. \n"
-                #"Only the 'admin' user (default password: adminpass) can register new users.",
+                "All protected endpoints require this token for access. \n",
     version="1.0.0",
     redirect_slashes=False,
     openapi_tags=[
@@ -522,6 +520,100 @@ async def translate(
     except ValueError as e:
         logger.error(f"Invalid JSON response: {str(e)}")
         raise HTTPException(status_code=500, detail="Invalid response format from translation service")
+    
+
+# Request/Response Models for Visual Query
+class VisualQueryRequest(BaseModel):
+    query: str
+    src_lang: str = "kan_Knda"  # Default to Kannada
+    tgt_lang: str = "kan_Knda"  # Default to Kannada
+
+    @field_validator("query")
+    def query_must_be_valid(cls, v):
+        if len(v) > 1000:
+            raise ValueError("Query cannot exceed 1000 characters")
+        return v.strip()
+
+class VisualQueryResponse(BaseModel):
+    answer: str
+
+
+@app.post("/v1/visual_query", response_model=VisualQueryResponse)
+@limiter.limit(settings.chat_rate_limit)
+async def visual_query(
+    request: Request,
+    query: str = Form(...),
+    file: UploadFile = File(...),
+    src_lang: str = Query(default="kan_Knda"),
+    tgt_lang: str = Query(default="kan_Knda"),
+    #api_key: str = Depends(get_api_key)  # Uncomment if authentication is needed
+):
+    """
+    Endpoint to process visual queries with an image and text question.
+    Calls an external API to analyze the image and provide a response.
+    """
+    if not query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+    
+    logger.info("Processing visual query request", extra={
+        "endpoint": "/v1/visual_query",
+        "query_length": len(query),
+        "file_name": file.filename,  # Changed from "filename" to "file_name"
+        "client_ip": get_remote_address(request),
+        "src_lang": src_lang,
+        "tgt_lang": tgt_lang
+    })
+    
+    # External API URL
+    external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/v1/visual_query/?src_lang={src_lang}&tgt_lang={tgt_lang}"
+    
+    try:
+        # Read file content
+        file_content = await file.read()
+        
+        # Prepare multipart/form-data
+        files = {
+            "file": (file.filename, file_content, file.content_type)
+        }
+        data = {
+            "query": query
+        }
+        
+        # Make the POST request to external API
+        response = requests.post(
+            external_url,
+            files=files,
+            data=data,
+            headers={"accept": "application/json"},
+            timeout=60
+        )
+        
+        # Raise an exception for bad status codes
+        response.raise_for_status()
+        
+        # Parse the response
+        response_data = response.json()
+        answer = response_data.get("answer", "")
+        
+        if not answer:
+            logger.warning(f"Empty answer received from external API: {response_data}")
+            raise HTTPException(status_code=500, detail="No answer provided by visual query service")
+        
+        logger.info(f"Visual query successful: {answer}")
+        return VisualQueryResponse(answer=answer)
+    
+    except requests.Timeout:
+        logger.error("Visual query request timed out")
+        raise HTTPException(status_code=504, detail="Visual query service timeout")
+    except requests.RequestException as e:
+        logger.error(f"Error during visual query: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Visual query failed: {str(e)}")
+    except ValueError as e:
+        logger.error(f"Invalid JSON response: {str(e)}")
+        raise HTTPException(status_code=500, detail="Invalid response format from visual query service")
+    except Exception as e:
+        logger.error(f"Unexpected error in visual query: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the FastAPI server.")
