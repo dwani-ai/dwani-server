@@ -29,7 +29,8 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 class Settings(BaseSettings):
     api_key_secret: str = Field(..., env="API_KEY_SECRET")
-    token_expiration_minutes: int = Field(30, env="TOKEN_EXPIRATION_MINUTES")
+    token_expiration_minutes: int = Field(1440, env="TOKEN_EXPIRATION_MINUTES")  # 24 hours
+    refresh_token_expiration_days: int = Field(7, env="REFRESH_TOKEN_EXPIRATION_DAYS")  # 7 days
     llm_model_name: str = "google/gemma-3-4b-it"
     max_tokens: int = 512
     host: str = "0.0.0.0"
@@ -40,7 +41,6 @@ class Settings(BaseSettings):
     external_asr_url: str = Field(..., env="EXTERNAL_ASR_URL")
     external_text_gen_url: str = Field(..., env="EXTERNAL_TEXT_GEN_URL")
     external_audio_proc_url: str = Field(..., env="EXTERNAL_AUDIO_PROC_URL")
-    # Admin credentials required from environment variables, no defaults
     default_admin_username: str = Field("admin", env="DEFAULT_ADMIN_USERNAME")
     default_admin_password: str = Field("admin54321", env="DEFAULT_ADMIN_PASSWORD")
 
@@ -49,7 +49,6 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
 
 settings = Settings()
-logger.info(f"Loaded API_KEY_SECRET at startup: {settings.api_key_secret}")
 
 # Seed initial data (optional)
 def seed_initial_data():
@@ -77,9 +76,11 @@ bearer_scheme = HTTPBearer()
 class TokenPayload(BaseModel):
     sub: str
     exp: float
+    type: str
 
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str
 
 class LoginRequest(BaseModel):
@@ -90,13 +91,15 @@ class RegisterRequest(BaseModel):
     username: str
     password: str
 
-async def create_access_token(user_id: str) -> str:
+async def create_access_token(user_id: str) -> dict:
     expire = datetime.utcnow() + timedelta(minutes=settings.token_expiration_minutes)
-    payload = {"sub": user_id, "exp": expire.timestamp()}
-    logger.info(f"Signing token with API_KEY_SECRET: {settings.api_key_secret}")
+    payload = {"sub": user_id, "exp": expire.timestamp(), "type": "access"}
     token = jwt.encode(payload, settings.api_key_secret, algorithm="HS256")
-    logger.info(f"Generated access token for user: {user_id}")
-    return token
+    refresh_expire = datetime.utcnow() + timedelta(days=settings.refresh_token_expiration_days)
+    refresh_payload = {"sub": user_id, "exp": refresh_expire.timestamp(), "type": "refresh"}
+    refresh_token = jwt.encode(refresh_payload, settings.api_key_secret, algorithm="HS256")
+    logger.info(f"Generated tokens for user: {user_id}")
+    return {"access_token": token, "refresh_token": refresh_token}
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
     token = credentials.credentials
@@ -106,10 +109,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        logger.info(f"Received token: {token}")
-        logger.info(f"Verifying token with API_KEY_SECRET: {settings.api_key_secret}")
         payload = jwt.decode(token, settings.api_key_secret, algorithms=["HS256"], options={"verify_exp": False})
-        logger.info(f"Decoded payload: {payload}")
         token_data = TokenPayload(**payload)
         user_id = token_data.sub
         
@@ -121,7 +121,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
             raise credentials_exception
         
         current_time = datetime.utcnow().timestamp()
-        logger.info(f"Current time: {current_time}, Token exp: {token_data.exp}")
         if current_time > token_data.exp:
             logger.warning(f"Token expired: current_time={current_time}, exp={token_data.exp}")
             raise HTTPException(
@@ -159,8 +158,8 @@ async def login(login_request: LoginRequest) -> TokenResponse:
     if not user or not pwd_context.verify(login_request.password, user.password):
         logger.warning(f"Login failed for user: {login_request.username}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
-    token = await create_access_token(user_id=user.username)
-    return TokenResponse(access_token=token, token_type="bearer")
+    tokens = await create_access_token(user_id=user.username)
+    return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
 
 async def register(register_request: RegisterRequest, current_user: str = Depends(get_current_user_with_admin)) -> TokenResponse:
     db = SessionLocal()
@@ -176,11 +175,26 @@ async def register(register_request: RegisterRequest, current_user: str = Depend
     db.commit()
     db.close()
     
-    token = await create_access_token(user_id=register_request.username)
+    tokens = await create_access_token(user_id=register_request.username)
     logger.info(f"Registered and generated token for user: {register_request.username} by admin {current_user}")
-    return TokenResponse(access_token=token, token_type="bearer")
+    return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
 
 async def refresh_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> TokenResponse:
-    user_id = await get_current_user(credentials)
-    new_token = await create_access_token(user_id=user_id)
-    return TokenResponse(access_token=new_token, token_type="bearer")
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, settings.api_key_secret, algorithms=["HS256"])
+        token_data = TokenPayload(**payload)
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type; refresh token required")
+        user_id = token_data.sub
+        db = SessionLocal()
+        user = db.query(User).filter_by(username=user_id).first()
+        db.close()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        if datetime.utcnow().timestamp() > token_data.exp:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token has expired")
+        tokens = await create_access_token(user_id=user_id)
+        return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")

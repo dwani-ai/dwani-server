@@ -5,7 +5,7 @@ from typing import List, Optional
 from abc import ABC, abstractmethod
 
 import uvicorn
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Form, Security
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -147,7 +147,7 @@ async def home():
 @app.post("/v1/token", 
           response_model=TokenResponse,
           summary="User Login",
-          description="Authenticate a user with username and password to obtain an access token. Copy the token and use it in the 'Authorize' button above.",
+          description="Authenticate a user with username and password to obtain an access token and refresh token. Copy the access token and use it in the 'Authorize' button above.",
           tags=["Authentication"],
           responses={
               200: {"description": "Successful login", "model": TokenResponse},
@@ -159,11 +159,11 @@ async def token(login_request: LoginRequest):
 @app.post("/v1/refresh", 
           response_model=TokenResponse,
           summary="Refresh Access Token",
-          description="Generate a new access token using an existing valid token.",
+          description="Generate a new access token and refresh token using an existing valid refresh token.",
           tags=["Authentication"],
           responses={
-              200: {"description": "New token issued", "model": TokenResponse},
-              401: {"description": "Invalid or expired token"}
+              200: {"description": "New tokens issued", "model": TokenResponse},
+              401: {"description": "Invalid or expired refresh token"}
           })
 async def refresh(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
     return await refresh_token(credentials)
@@ -171,7 +171,7 @@ async def refresh(credentials: HTTPAuthorizationCredentials = Depends(bearer_sch
 @app.post("/v1/register", 
           response_model=TokenResponse,
           summary="Register New User",
-          description="Create a new user account and return an access token. Requires admin access (use 'admin' user with password 'adminpass' initially).",
+          description="Create a new user account and return an access token and refresh token. Requires admin access (use 'admin' user with password 'adminpass' initially).",
           tags=["Authentication"],
           responses={
               200: {"description": "User registered successfully", "model": TokenResponse},
@@ -180,9 +180,9 @@ async def refresh(credentials: HTTPAuthorizationCredentials = Depends(bearer_sch
           })
 async def register_user(
     register_request: RegisterRequest,
-    current_user: str = Depends(get_current_user_with_admin)  # Enforce admin-only access
+    current_user: str = Depends(get_current_user_with_admin)
 ):
-    return await register(register_request, current_user)  # Pass current_user explicitly
+    return await register(register_request, current_user)
 
 @app.post("/v1/audio/speech",
           summary="Generate Speech from Text",
@@ -520,9 +520,7 @@ async def translate(
     except ValueError as e:
         logger.error(f"Invalid JSON response: {str(e)}")
         raise HTTPException(status_code=500, detail="Invalid response format from translation service")
-    
 
-# Request/Response Models for Visual Query
 class VisualQueryRequest(BaseModel):
     query: str
     src_lang: str = "kan_Knda"  # Default to Kannada
@@ -537,49 +535,48 @@ class VisualQueryRequest(BaseModel):
 class VisualQueryResponse(BaseModel):
     answer: str
 
-
-@app.post("/v1/visual_query", response_model=VisualQueryResponse)
+@app.post("/v1/visual_query", 
+          response_model=VisualQueryResponse,
+          summary="Visual Query with Image",
+          description="Process a visual query with an image and text question. Rate limited to 100 requests per minute per user. Requires authentication.",
+          tags=["Chat"],
+          responses={
+              200: {"description": "Query response", "model": VisualQueryResponse},
+              400: {"description": "Invalid query"},
+              401: {"description": "Unauthorized - Token required"},
+              429: {"description": "Rate limit exceeded"},
+              504: {"description": "Visual query service timeout"}
+          })
 @limiter.limit(settings.chat_rate_limit)
 async def visual_query(
     request: Request,
-    query: str = Form(...),
-    file: UploadFile = File(...),
-    src_lang: str = Query(default="kan_Knda"),
-    tgt_lang: str = Query(default="kan_Knda"),
-    #api_key: str = Depends(get_api_key)  # Uncomment if authentication is needed
+    query: str = Form(..., description="Text query for the visual content"),
+    file: UploadFile = File(..., description="Image file to analyze"),
+    src_lang: str = Query(default="kan_Knda", description="Source language code"),
+    tgt_lang: str = Query(default="kan_Knda", description="Target language code"),
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
 ):
-    """
-    Endpoint to process visual queries with an image and text question.
-    Calls an external API to analyze the image and provide a response.
-    """
+    user_id = await get_current_user(credentials)
     if not query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
     
     logger.info("Processing visual query request", extra={
         "endpoint": "/v1/visual_query",
         "query_length": len(query),
-        "file_name": file.filename,  # Changed from "filename" to "file_name"
+        "file_name": file.filename,
         "client_ip": get_remote_address(request),
+        "user_id": user_id,
         "src_lang": src_lang,
         "tgt_lang": tgt_lang
     })
     
-    # External API URL
     external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/v1/visual_query/?src_lang={src_lang}&tgt_lang={tgt_lang}"
     
     try:
-        # Read file content
         file_content = await file.read()
+        files = {"file": (file.filename, file_content, file.content_type)}
+        data = {"query": query}
         
-        # Prepare multipart/form-data
-        files = {
-            "file": (file.filename, file_content, file.content_type)
-        }
-        data = {
-            "query": query
-        }
-        
-        # Make the POST request to external API
         response = requests.post(
             external_url,
             files=files,
@@ -587,11 +584,8 @@ async def visual_query(
             headers={"accept": "application/json"},
             timeout=60
         )
-        
-        # Raise an exception for bad status codes
         response.raise_for_status()
         
-        # Parse the response
         response_data = response.json()
         answer = response_data.get("answer", "")
         
@@ -611,9 +605,6 @@ async def visual_query(
     except ValueError as e:
         logger.error(f"Invalid JSON response: {str(e)}")
         raise HTTPException(status_code=500, detail="Invalid response format from visual query service")
-    except Exception as e:
-        logger.error(f"Unexpected error in visual query: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the FastAPI server.")
