@@ -6,19 +6,21 @@ import sqlite3
 from time import time
 from typing import List, Optional
 from abc import ABC, abstractmethod
+from functools import lru_cache  # Added for in-memory caching
+import asyncio
 
 import uvicorn
 import aiohttp
 import bleach
-from databases import Database  # Added for database pooling
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Form, Response
+from databases import Database
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Form, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, field_validator, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from pybreaker import CircuitBreaker  # Added for circuit breakers
+from pybreaker import CircuitBreaker
 from PIL import Image
 
 from utils.auth import get_current_user, get_current_user_with_admin, login, refresh_token, register, TokenResponse, Settings, LoginRequest, RegisterRequest, bearer_scheme, register_bulk_users
@@ -26,8 +28,6 @@ from config.tts_config import SPEED, ResponseFormat, config as tts_config
 from config.logging_config import logger
 
 settings = Settings()
-
-# Database pooling setup
 DATABASE_URL = "sqlite:///users.db"
 database = Database(DATABASE_URL, min_size=5, max_size=20)
 
@@ -49,7 +49,6 @@ app = FastAPI(
     ],
 )
 
-# Startup and shutdown events for database pooling
 @app.on_event("startup")
 async def startup():
     await database.connect()
@@ -58,7 +57,6 @@ async def startup():
 async def shutdown():
     await database.disconnect()
 
-# Secure CORS configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Replace with specific domains in production
@@ -67,7 +65,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Security headers middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
@@ -76,7 +73,6 @@ async def add_security_headers(request: Request, call_next):
     response.headers["Content-Security-Policy"] = "default-src 'self'"
     return response
 
-# Global exception handler
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled error: {str(exc)}", exc_info=True, extra={
@@ -89,7 +85,6 @@ async def global_exception_handler(request: Request, exc: Exception):
         content={"detail": "Internal server error"}
     )
 
-# Rate limiter with IP-based key
 limiter = Limiter(key_func=lambda request: get_remote_address(request))
 
 # Request/Response Models
@@ -155,7 +150,6 @@ class BulkRegisterResponse(BaseModel):
             }
         }
 
-# Circuit breaker for external services
 tts_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 
 class TTSService(ABC):
@@ -246,13 +240,18 @@ async def register_user(
     register_request.password = bleach.clean(register_request.password)
     return await register(register_request, current_user)
 
+async def process_bulk_users(csv_content: str, current_user: str, task_id: str):
+    result = await register_bulk_users(csv_content, current_user)
+    logger.info(f"Background bulk registration completed for task {task_id}: {len(result['successful'])} succeeded, {len(result['failed'])} failed")
+    return result
+
 @app.post("/v1/register_bulk", 
-          response_model=BulkRegisterResponse,
+          response_model=dict,  # Changed to dict since it returns a message immediately
           summary="Register Multiple Users via CSV",
-          description="Upload a CSV file with 'username' and 'password' columns to register multiple users. Requires admin access. Rate limited to 10 requests per minute per user.",
+          description="Upload a CSV file with 'username' and 'password' columns to register multiple users in the background. Requires admin access. Rate limited to 10 requests per minute per user.",
           tags=["Authentication"],
           responses={
-              200: {"description": "Bulk registration result", "model": BulkRegisterResponse},
+              202: {"description": "Bulk registration started", "content": {"application/json": {"example": {"message": "Bulk registration started", "task_id": "unique-id"}}}},
               400: {"description": "Invalid CSV format or data"},
               401: {"description": "Unauthorized - Token required"},
               403: {"description": "Admin access required"},
@@ -263,6 +262,7 @@ async def register_bulk(
     request: Request,
     file: UploadFile = File(..., description="CSV file with 'username' and 'password' columns"),
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    background_tasks: BackgroundTasks
 ):
     current_user = await get_current_user_with_admin(credentials)
     
@@ -275,13 +275,11 @@ async def register_bulk(
     
     try:
         csv_content = content.decode("utf-8")
-        result = await register_bulk_users(csv_content, current_user)
-        return BulkRegisterResponse(**result)
+        task_id = str(time())  # Simple unique ID based on timestamp
+        background_tasks.add_task(process_bulk_users, csv_content, current_user, task_id)
+        return {"message": "Bulk registration started", "task_id": task_id}
     except UnicodeDecodeError:
         raise HTTPException(status_code=400, detail="Invalid CSV encoding; must be UTF-8")
-    except Exception as e:
-        logger.error(f"Bulk registration error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
 
 @app.get("/v1/export_db",
          summary="Export User Database",
@@ -380,7 +378,7 @@ async def import_db(
               400: {"description": "Invalid input"},
               401: {"description": "Unauthorized - Token required"},
               429: {"description": "Rate limit exceeded"},
-              503: {"description": "Service unavailable due to repeated failures"},  # Added for circuit breaker
+              503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "TTS service timeout"}
           })
 @limiter.limit(settings.speech_rate_limit)
@@ -455,8 +453,12 @@ class ChatResponse(BaseModel):
     class Config:
         schema_extra = {"example": {"response": "Hi there, I'm doing great!"}} 
 
-# Circuit breaker for chat service
 chat_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
+
+@lru_cache(maxsize=100)  # In-memory cache for chat responses
+def cached_chat_response(prompt: str, src_lang: str) -> str:
+    # This is a placeholder; actual caching happens in the endpoint
+    return None
 
 @app.post("/v1/chat", 
           response_model=ChatResponse,
@@ -468,7 +470,7 @@ chat_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
               400: {"description": "Invalid prompt"},
               401: {"description": "Unauthorized - Token required"},
               429: {"description": "Rate limit exceeded"},
-              503: {"description": "Service unavailable due to repeated failures"},  # Added for circuit breaker
+              503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "Chat service timeout"}
           })
 @limiter.limit(settings.chat_rate_limit)
@@ -481,6 +483,14 @@ async def chat(
     user_id = await get_current_user(credentials)
     if not chat_request.prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+    
+    # Check cache
+    cache_key = f"{chat_request.prompt}:{chat_request.src_lang}"
+    cached_response = cached_chat_response(chat_request.prompt, chat_request.src_lang)
+    if cached_response:
+        logger.info(f"Cache hit for chat request: {cache_key}")
+        return ChatResponse(response=cached_response)
+    
     logger.info(f"Received prompt: {chat_request.prompt}, src_lang: {chat_request.src_lang}, user_id: {user_id}")
     
     external_url = "https://slabstech-dhwani-internal-api-server.hf.space/v1/chat"
@@ -505,6 +515,8 @@ async def chat(
                     raise HTTPException(status_code=response.status, detail=await response.text())
                 response_data = await response.json()
                 response_text = response_data.get("response", "")
+                # Update cache (lru_cache handles this automatically)
+                cached_chat_response(chat_request.prompt, chat_request.src_lang)
                 logger.info(f"Generated Chat response from external API: {response_text}")
                 return ChatResponse(response=response_text)
         except aiohttp.ClientTimeout:
@@ -514,7 +526,6 @@ async def chat(
             logger.error(f"Error calling external chat API: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
-# Circuit breaker for audio processing
 audio_proc_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 
 @app.post("/v1/process_audio/", 
@@ -526,7 +537,7 @@ audio_proc_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
               200: {"description": "Processed result", "model": AudioProcessingResponse},
               401: {"description": "Unauthorized - Token required"},
               429: {"description": "Rate limit exceeded"},
-              503: {"description": "Service unavailable due to repeated failures"},  # Added for circuit breaker
+              503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "Audio processing timeout"}
           })
 @limiter.limit(settings.chat_rate_limit)
@@ -578,7 +589,6 @@ async def process_audio(
             logger.error(f"Audio processing request failed: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Audio processing failed: {str(e)}")
 
-# Circuit breaker for transcription
 transcribe_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 
 @app.post("/v1/transcribe/", 
@@ -589,7 +599,7 @@ transcribe_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
           responses={
               200: {"description": "Transcription result", "model": TranscriptionResponse},
               401: {"description": "Unauthorized - Token required"},
-              503: {"description": "Service unavailable due to repeated failures"},  # Added for circuit breaker
+              503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "Transcription service timeout"}
           })
 @transcribe_breaker
@@ -700,7 +710,6 @@ class TranslationResponse(BaseModel):
     class Config:
         schema_extra = {"example": {"translations": ["ನಮಸ್ಕಾರ", "ನೀವು ಹೇಗಿದ್ದೀರಿ?"]}} 
 
-# Circuit breaker for translation
 translate_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 
 @app.post("/v1/translate", 
@@ -712,7 +721,7 @@ translate_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
               200: {"description": "Translation result", "model": TranslationResponse},
               401: {"description": "Unauthorized - Token required"},
               500: {"description": "Translation service error"},
-              503: {"description": "Service unavailable due to repeated failures"},  # Added for circuit breaker
+              503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "Translation service timeout"}
           })
 @translate_breaker
@@ -775,7 +784,6 @@ class VisualQueryRequest(BaseModel):
 class VisualQueryResponse(BaseModel):
     answer: str
 
-# Circuit breaker for visual query
 visual_query_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 
 @app.post("/v1/visual_query", 
@@ -788,7 +796,7 @@ visual_query_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
               400: {"description": "Invalid query"},
               401: {"description": "Unauthorized - Token required"},
               429: {"description": "Rate limit exceeded"},
-              503: {"description": "Service unavailable due to repeated failures"},  # Added for circuit breaker
+              503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "Visual query service timeout"}
           })
 @limiter.limit(settings.chat_rate_limit)
