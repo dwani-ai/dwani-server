@@ -5,3 +5,4 @@ slowapi
 requests
 python-multipart
 pillow
+cryptography

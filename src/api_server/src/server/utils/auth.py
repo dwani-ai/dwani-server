@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, Column, String, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from passlib.context import CryptContext
+from cryptography.fernet import Fernet, InvalidToken
 
 # SQLite database setup
 DATABASE_URL = "sqlite:///users.db"
@@ -21,7 +22,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 class User(Base):
     __tablename__ = "users"
     username = Column(String, primary_key=True, index=True)
-    password = Column(String)  # Stores hashed passwords
+    password = Column(String)  # Stores encrypted hashed passwords
     is_admin = Column(Boolean, default=False)  # New admin flag
 
 Base.metadata.create_all(bind=engine)
@@ -29,6 +30,7 @@ Base.metadata.create_all(bind=engine)
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# Encryption setup
 class Settings(BaseSettings):
     api_key_secret: str = Field(..., env="API_KEY_SECRET")
     token_expiration_minutes: int = Field(1440, env="TOKEN_EXPIRATION_MINUTES")  # 24 hours
@@ -45,12 +47,14 @@ class Settings(BaseSettings):
     external_audio_proc_url: str = Field(..., env="EXTERNAL_AUDIO_PROC_URL")
     default_admin_username: str = Field("admin", env="DEFAULT_ADMIN_USERNAME")
     default_admin_password: str = Field("admin54321", env="DEFAULT_ADMIN_PASSWORD")
+    encryption_key: str = Field(..., env="ENCRYPTION_KEY")  # Fernet key for encryption
 
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
 
 settings = Settings()
+fernet = Fernet(settings.encryption_key.encode())  # Initialize Fernet with the key from settings
 
 # Seed initial data (optional)
 def seed_initial_data():
@@ -58,14 +62,16 @@ def seed_initial_data():
     # Seed test user (non-admin)
     if not db.query(User).filter_by(username="testuser").first():
         hashed_password = pwd_context.hash("password123")
-        db.add(User(username="testuser", password=hashed_password, is_admin=False))
+        encrypted_password = fernet.encrypt(hashed_password.encode()).decode()
+        db.add(User(username="testuser", password=encrypted_password, is_admin=False))
         db.commit()
     # Seed admin user using environment variables
     admin_username = settings.default_admin_username
     admin_password = settings.default_admin_password
     if not db.query(User).filter_by(username=admin_username).first():
         hashed_password = pwd_context.hash(admin_password)
-        db.add(User(username=admin_username, password=hashed_password, is_admin=True))
+        encrypted_password = fernet.encrypt(hashed_password.encode()).decode()
+        db.add(User(username=admin_username, password=encrypted_password, is_admin=True))
         db.commit()
     db.close()
     logger.info(f"Seeded initial data: admin user '{admin_username}'")
@@ -157,9 +163,19 @@ async def login(login_request: LoginRequest) -> TokenResponse:
     db = SessionLocal()
     user = db.query(User).filter_by(username=login_request.username).first()
     db.close()
-    if not user or not pwd_context.verify(login_request.password, user.password):
-        logger.warning(f"Login failed for user: {login_request.username}")
+    if not user:
+        logger.warning(f"Login failed for user: {login_request.username} - User not found")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+    
+    try:
+        decrypted_password = fernet.decrypt(user.password.encode()).decode()
+        if not pwd_context.verify(login_request.password, decrypted_password):
+            logger.warning(f"Login failed for user: {login_request.username} - Invalid password")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+    except InvalidToken:
+        logger.error(f"Decryption failed for user: {login_request.username}")
+        raise HTTPException(status_code=status.HTTP_500_UNAUTHORIZED, detail="Internal server error - decryption failed")
+    
     tokens = await create_access_token(user_id=user.username)
     return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
 
@@ -172,7 +188,8 @@ async def register(register_request: RegisterRequest, current_user: str = Depend
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already exists")
     
     hashed_password = pwd_context.hash(register_request.password)
-    new_user = User(username=register_request.username, password=hashed_password, is_admin=False)
+    encrypted_password = fernet.encrypt(hashed_password.encode()).decode()
+    new_user = User(username=register_request.username, password=encrypted_password, is_admin=False)
     db.add(new_user)
     db.commit()
     db.close()
@@ -206,7 +223,8 @@ async def register_bulk_users(csv_content: str, current_user: str) -> dict:
         
         try:
             hashed_password = pwd_context.hash(password)
-            new_user = User(username=username, password=hashed_password, is_admin=False)
+            encrypted_password = fernet.encrypt(hashed_password.encode()).decode()
+            new_user = User(username=username, password=encrypted_password, is_admin=False)
             db.add(new_user)
             result["successful"].append(username)
         except Exception as e:
