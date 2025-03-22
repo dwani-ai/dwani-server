@@ -2,6 +2,7 @@ import jwt
 import csv
 from io import StringIO
 from datetime import datetime, timedelta
+from functools import lru_cache  # Added for in-memory caching
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -9,19 +10,16 @@ from pydantic_settings import BaseSettings
 from config.logging_config import logger
 from passlib.context import CryptContext
 from cryptography.fernet import Fernet, InvalidToken
-from databases import Database  # Added for async database pooling
+from databases import Database
 
-# Import database from main app (assuming it's in the same project structure)
-from your_main_app_file import database  # Replace with actual filename (e.g., main.py)
+from ..main import database  # Replace with actual filename
 
-# Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Encryption setup
 class Settings(BaseSettings):
     api_key_secret: str = Field(..., env="API_KEY_SECRET")
-    token_expiration_minutes: int = Field(1440, env="TOKEN_EXPIRATION_MINUTES")  # 24 hours
-    refresh_token_expiration_days: int = Field(7, env="REFRESH_TOKEN_EXPIRATION_DAYS")  # 7 days
+    token_expiration_minutes: int = Field(1440, env="TOKEN_EXPIRATION_MINUTES")
+    refresh_token_expiration_days: int = Field(7, env="REFRESH_TOKEN_EXPIRATION_DAYS")
     llm_model_name: str = "google/gemma-3-4b-it"
     max_tokens: int = 512
     host: str = "0.0.0.0"
@@ -34,7 +32,7 @@ class Settings(BaseSettings):
     external_audio_proc_url: str = Field(..., env="EXTERNAL_AUDIO_PROC_URL")
     default_admin_username: str = Field("admin", env="DEFAULT_ADMIN_USERNAME")
     default_admin_password: str = Field("admin54321", env="DEFAULT_ADMIN_PASSWORD")
-    encryption_key: str = Field(..., env="ENCRYPTION_KEY")  # Fernet key for encryption
+    encryption_key: str = Field(..., env="ENCRYPTION_KEY")
 
     class Config:
         env_file = ".env"
@@ -43,9 +41,7 @@ class Settings(BaseSettings):
 settings = Settings()
 fernet = Fernet(settings.encryption_key.encode())
 
-# Seed initial data (updated for async database)
 async def seed_initial_data():
-    # Check if test user exists
     test_user = await database.fetch_one("SELECT username FROM users WHERE username = :username", {"username": "testuser"})
     if not test_user:
         hashed_password = pwd_context.hash("password123")
@@ -55,7 +51,6 @@ async def seed_initial_data():
             {"username": "testuser", "password": encrypted_password, "is_admin": False}
         )
     
-    # Seed admin user
     admin_username = settings.default_admin_username
     admin_password = settings.default_admin_password
     admin_user = await database.fetch_one("SELECT username FROM users WHERE username = :username", {"username": admin_username})
@@ -68,7 +63,6 @@ async def seed_initial_data():
         )
     logger.info(f"Seeded initial data: admin user '{admin_username}'")
 
-# HTTPBearer setup
 bearer_scheme = HTTPBearer()
 
 class TokenPayload(BaseModel):
@@ -89,15 +83,45 @@ class RegisterRequest(BaseModel):
     username: str
     password: str
 
-async def create_access_token(user_id: str) -> dict:
+@lru_cache(maxsize=1000)  # Cache token creation for 1000 unique user IDs
+def cached_create_access_token(user_id: str) -> dict:
     expire = datetime.utcnow() + timedelta(minutes=settings.token_expiration_minutes)
     payload = {"sub": user_id, "exp": expire.timestamp(), "type": "access"}
     token = jwt.encode(payload, settings.api_key_secret, algorithm="HS256")
     refresh_expire = datetime.utcnow() + timedelta(days=settings.refresh_token_expiration_days)
     refresh_payload = {"sub": user_id, "exp": refresh_expire.timestamp(), "type": "refresh"}
     refresh_token = jwt.encode(refresh_payload, settings.api_key_secret, algorithm="HS256")
-    logger.info(f"Generated tokens for user: {user_id}")
     return {"access_token": token, "refresh_token": refresh_token}
+
+async def create_access_token(user_id: str) -> dict:
+    tokens = cached_create_access_token(user_id)
+    logger.info(f"Generated tokens for user: {user_id}")
+    return tokens
+
+@lru_cache(maxsize=1000)  # Cache user validation for 1000 unique tokens
+def cached_get_user(token: str) -> Optional[str]:
+    try:
+        payload = jwt.decode(token, settings.api_key_secret, algorithms=["HS256"], options={"verify_exp": False})
+        token_data = TokenPayload(**payload)
+        user_id = token_data.sub
+        
+        async def fetch_user():
+            user = await database.fetch_one(
+                "SELECT username FROM users WHERE username = :username",
+                {"username": user_id}
+            )
+            return user_id if user else None
+        
+        user_id = asyncio.run(fetch_user())  # Note: This is a simplification; ideally, make async fully compatible
+        if user_id is None:
+            return None
+        
+        current_time = datetime.utcnow().timestamp()
+        if current_time > token_data.exp:
+            return None
+        return user_id
+    except (jwt.InvalidSignatureError, jwt.InvalidTokenError):
+        return None
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
     token = credentials.credentials
@@ -106,6 +130,12 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
         detail="Invalid authentication credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    
+    cached_user = cached_get_user(token)
+    if cached_user:
+        logger.info(f"Cache hit for user validation: {cached_user}")
+        return cached_user
+    
     try:
         payload = jwt.decode(token, settings.api_key_secret, algorithms=["HS256"], options={"verify_exp": False})
         token_data = TokenPayload(**payload)
@@ -128,13 +158,14 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
+        cached_get_user(token)  # Update cache
         logger.info(f"Validated token for user: {user_id}")
         return user_id
     except jwt.InvalidSignatureError as e:
         logger.error(f"Invalid signature error: {str(e)}")
         raise credentials_exception
     except jwt.InvalidTokenError as e:
-        logger.error(f"Other token error: {str(e)}")
+        logger.error tranh khôf"Other token error: {str(e)}")
         raise credentials_exception
     except Exception as e:
         logger.error(f"Unexpected token validation error: {str(e)}")
@@ -227,8 +258,7 @@ async def register_bulk_users(csv_content: str, current_user: str) -> dict:
             except Exception as e:
                 result["failed"].append({"username": username, "reason": str(e)})
     
-    logger.info(f"Bulk registration by {current_user}: {len(result['successful'])} succeeded, {len(result['failed'])} failed")
-    return result
+    return result  # Logging moved to background task in main app
 
 async def refresh_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> TokenResponse:
     token = credentials.credentials
