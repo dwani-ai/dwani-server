@@ -8,7 +8,7 @@ from typing import List, Optional, Dict
 from abc import ABC, abstractmethod
 from functools import lru_cache
 import asyncio
-from collections import Counter  # Added for metrics
+from collections import Counter
 
 import uvicorn
 import aiohttp
@@ -39,7 +39,7 @@ runtime_config = {
 }
 metrics = {
     "request_count": Counter(),
-    "response_times": {}  # Endpoint -> List of response times
+    "response_times": {}
 }
 
 app = FastAPI(
@@ -63,6 +63,16 @@ app = FastAPI(
 @app.on_event("startup")
 async def startup():
     await database.connect()
+    # Create tasks table if it doesn't exist
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            result TEXT,
+            created_at REAL NOT NULL,
+            completed_at REAL
+        )
+    """)
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -84,7 +94,6 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Content-Security-Policy"] = "default-src 'self'"
     
-    # Record metrics
     endpoint = request.url.path
     duration = time() - start_time
     metrics["request_count"][endpoint] += 1
@@ -172,6 +181,13 @@ class ConfigUpdateRequest(BaseModel):
     chat_rate_limit: Optional[str] = Field(None, description="Chat endpoint rate limit (e.g., '100/minute')")
     speech_rate_limit: Optional[str] = Field(None, description="Speech endpoint rate limit (e.g., '5/minute')")
 
+class TaskStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    result: Optional[Dict] = None
+    created_at: float
+    completed_at: Optional[float] = None
+
 tts_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 
 class TTSService(ABC):
@@ -209,7 +225,6 @@ def get_tts_service() -> TTSService:
 async def health_check():
     health_status = {"status": "healthy", "model": settings.llm_model_name}
     
-    # Check database connectivity
     try:
         await database.fetch_one("SELECT 1")
         health_status["database"] = "connected"
@@ -218,7 +233,6 @@ async def health_check():
         health_status["database"] = f"error: {str(e)}"
         logger.error(f"Database health check failed: {str(e)}")
     
-    # Check external TTS service
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(settings.external_tts_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
@@ -298,14 +312,38 @@ async def register_user(
     return await register(register_request, current_user)
 
 async def process_bulk_users(csv_content: str, current_user: str, task_id: str):
-    result = await register_bulk_users(csv_content, current_user)
-    logger.info(f"Background bulk registration completed for task {task_id}: {len(result['successful'])} succeeded, {len(result['failed'])} failed")
-    return result
+    await database.execute(
+        "INSERT INTO tasks (task_id, status, created_at) VALUES (:task_id, :status, :created_at)",
+        {"task_id": task_id, "status": "running", "created_at": time()}
+    )
+    try:
+        result = await register_bulk_users(csv_content, current_user)
+        await database.execute(
+            "UPDATE tasks SET status = :status, result = :result, completed_at = :completed_at WHERE task_id = :task_id",
+            {
+                "task_id": task_id,
+                "status": "completed",
+                "result": str(result),  # Store as string (JSON-like)
+                "completed_at": time()
+            }
+        )
+        logger.info(f"Background bulk registration completed for task {task_id}: {len(result['successful'])} succeeded, {len(result['failed'])} failed")
+    except Exception as e:
+        await database.execute(
+            "UPDATE tasks SET status = :status, result = :result, completed_at = :completed_at WHERE task_id = :task_id",
+            {
+                "task_id": task_id,
+                "status": "failed",
+                "result": f"Error: {str(e)}",
+                "completed_at": time()
+            }
+        )
+        logger.error(f"Background bulk registration failed for task {task_id}: {str(e)}")
 
 @app.post("/v1/register_bulk", 
           response_model=dict,
           summary="Register Multiple Users via CSV",
-          description="Upload a CSV file with 'username' and 'password' columns to register multiple users in the background. Requires admin access. Rate limited to 10 requests per minute per user.",
+          description="Upload a CSV file with 'username' and 'password' columns to register multiple users in the background. Returns a task ID to track progress. Requires admin access. Rate limited to 10 requests per minute per user.",
           tags=["Authentication"],
           responses={
               202: {"description": "Bulk registration started", "content": {"application/json": {"example": {"message": "Bulk registration started", "task_id": "unique-id"}}}},
@@ -337,6 +375,37 @@ async def register_bulk(
         return {"message": "Bulk registration started", "task_id": task_id}
     except UnicodeDecodeError:
         raise HTTPException(status_code=400, detail="Invalid CSV encoding; must be UTF-8")
+
+@app.get("/v1/task_status/{task_id}",
+         response_model=TaskStatusResponse,
+         summary="Check Task Status",
+         description="Retrieve the status and result of a background task (e.g., bulk registration). Requires admin access.",
+         tags=["Authentication"],
+         responses={
+             200: {"description": "Task status", "model": TaskStatusResponse},
+             404: {"description": "Task not found"},
+             401: {"description": "Unauthorized - Token required"},
+             403: {"description": "Admin access required"}
+         })
+async def get_task_status(
+    task_id: str,
+    current_user: str = Depends(get_current_user_with_admin)
+):
+    task = await database.fetch_one(
+        "SELECT task_id, status, result, created_at, completed_at FROM tasks WHERE task_id = :task_id",
+        {"task_id": task_id}
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    result = eval(task["result"]) if task["result"] and task["status"] == "completed" else task["result"]  # Convert string to dict if completed
+    return TaskStatusResponse(
+        task_id=task["task_id"],
+        status=task["status"],
+        result=result,
+        created_at=task["created_at"],
+        completed_at=task["completed_at"]
+    )
 
 @app.get("/v1/export_db",
          summary="Export User Database",
@@ -442,14 +511,14 @@ async def update_config(
 ):
     if config_request.chat_rate_limit:
         try:
-            limiter._check_rate(config_request.chat_rate_limit)  # Validate format
+            limiter._check_rate(config_request.chat_rate_limit)
             runtime_config["chat_rate_limit"] = config_request.chat_rate_limit
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid chat_rate_limit format; use 'X/minute'")
     
     if config_request.speech_rate_limit:
         try:
-            limiter._check_rate(config_request.speech_rate_limit)  # Validate format
+            limiter._check_rate(config_request.speech_rate_limit)
             runtime_config["speech_rate_limit"] = config_request.speech_rate_limit
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid speech_rate_limit format; use 'X/minute'")
@@ -469,7 +538,7 @@ async def update_config(
               503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "TTS service timeout"}
           })
-@limiter.limit(lambda: runtime_config["speech_rate_limit"])  # Use runtime config
+@limiter.limit(lambda: runtime_config["speech_rate_limit"])
 async def generate_audio(
     request: Request,
     speech_request: SpeechRequest = Depends(),
@@ -560,7 +629,7 @@ def cached_chat_response(prompt: str, src_lang: str) -> str:
               503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "Chat service timeout"}
           })
-@limiter.limit(lambda: runtime_config["chat_rate_limit"])  # Use runtime config
+@limiter.limit(lambda: runtime_config["chat_rate_limit"])
 @chat_breaker
 async def chat(
     request: Request,
