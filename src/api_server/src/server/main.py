@@ -8,8 +8,9 @@ from typing import List, Optional
 from abc import ABC, abstractmethod
 
 import uvicorn
-import aiohttp  # Added for async HTTP requests
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Form
+import aiohttp
+import bleach  # Added for input sanitization
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Form, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -18,10 +19,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from PIL import Image
 
-# Import from auth.py
 from utils.auth import get_current_user, get_current_user_with_admin, login, refresh_token, register, TokenResponse, Settings, LoginRequest, RegisterRequest, bearer_scheme, register_bulk_users
-
-# Assuming these are in your project structure
 from config.tts_config import SPEED, ResponseFormat, config as tts_config
 from config.logging_config import logger
 
@@ -45,15 +43,26 @@ app = FastAPI(
     ],
 )
 
+# Secure CORS configuration (restricted in production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Replace with specific domains in production, e.g., ["https://trusted.domain.com"]
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-limiter = Limiter(key_func=lambda request: get_current_user(request.scope.get("route").dependencies))
+# Add security headers middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = "default-src 'self'"
+    return response
+
+# Rate limiter with IP-based key for login
+limiter = Limiter(key_func=lambda request: get_remote_address(request))
 
 # Request/Response Models
 class SpeechRequest(BaseModel):
@@ -65,6 +74,7 @@ class SpeechRequest(BaseModel):
 
     @field_validator("input")
     def input_must_be_valid(cls, v):
+        v = bleach.clean(v)  # Sanitize input
         if len(v) > 1000:
             raise ValueError("Input cannot exceed 1000 characters")
         return v.strip()
@@ -117,7 +127,6 @@ class BulkRegisterResponse(BaseModel):
             }
         }
 
-# TTS Service Interface
 class TTSService(ABC):
     @abstractmethod
     async def generate_speech(self, payload: dict) -> aiohttp.ClientResponse:
@@ -144,7 +153,6 @@ class ExternalTTSService(TTSService):
 def get_tts_service() -> TTSService:
     return ExternalTTSService()
 
-# Endpoints with enhanced Swagger docs
 @app.get("/v1/health", 
          summary="Check API Health",
          description="Returns the health status of the API and the current model in use.",
@@ -167,9 +175,14 @@ async def home():
           tags=["Authentication"],
           responses={
               200: {"description": "Successful login", "model": TokenResponse},
-              401: {"description": "Invalid username or password"}
+              401: {"description": "Invalid username or password"},
+              429: {"description": "Too many login attempts"}  # Added for rate limiting
           })
-async def token(login_request: LoginRequest):
+@limiter.limit("5/minute")  # Rate limit login attempts to 5 per minute per IP
+async def token(request: Request, login_request: LoginRequest):
+    # Sanitize username and password
+    login_request.username = bleach.clean(login_request.username)
+    login_request.password = bleach.clean(login_request.password)
     return await login(login_request)
 
 @app.post("/v1/refresh", 
@@ -198,6 +211,9 @@ async def register_user(
     register_request: RegisterRequest,
     current_user: str = Depends(get_current_user_with_admin)
 ):
+    # Sanitize username and password
+    register_request.username = bleach.clean(register_request.username)
+    register_request.password = bleach.clean(register_request.password)
     return await register(register_request, current_user)
 
 @app.post("/v1/register_bulk", 
@@ -222,9 +238,14 @@ async def register_bulk(
     
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="File must be a CSV")
+    if file.content_type != "text/csv":
+        raise HTTPException(status_code=400, detail="Invalid file type; only CSV allowed")
+    
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="File too large; max 10MB")
     
     try:
-        content = await file.read()
         csv_content = content.decode("utf-8")
         result = await register_bulk_users(csv_content, current_user)
         return BulkRegisterResponse(**result)
@@ -280,8 +301,11 @@ async def import_db(
     db_path = "users.db"
     temp_path = "users_temp.db"
     
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="File too large; max 10MB")
+    
     try:
-        content = await file.read()
         with open(temp_path, "wb") as f:
             f.write(content)
         
@@ -349,8 +373,8 @@ async def generate_audio(
     
     payload = {
         "input": speech_request.input,
-        "voice": speech_request.voice,
-        "model": speech_request.model,
+        "voice": bleach.clean(speech_request.voice),  # Sanitize voice
+        "model": bleach.clean(speech_request.model),  # Sanitize model
         "response_format": speech_request.response_format.value,
         "speed": speech_request.speed
     }
@@ -379,6 +403,7 @@ class ChatRequest(BaseModel):
 
     @field_validator("prompt")
     def prompt_must_be_valid(cls, v):
+        v = bleach.clean(v)  # Sanitize prompt
         if len(v) > 1000:
             raise ValueError("Prompt cannot exceed 1000 characters")
         return v.strip()
@@ -423,8 +448,8 @@ async def chat(
     external_url = "https://slabstech-dhwani-internal-api-server.hf.space/v1/chat"
     payload = {
         "prompt": chat_request.prompt,
-        "src_lang": chat_request.src_lang,
-        "tgt_lang": chat_request.src_lang
+        "src_lang": bleach.clean(chat_request.src_lang),
+        "tgt_lang": bleach.clean(chat_request.src_lang)
     }
     
     async with aiohttp.ClientSession() as session:
@@ -470,6 +495,15 @@ async def process_audio(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
 ):
     user_id = await get_current_user(credentials)
+    
+    allowed_types = ["audio/mpeg", "audio/wav", "audio/flac"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail=f"Invalid file type; allowed: {allowed_types}")
+    
+    file_content = await file.read()
+    if len(file_content) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="File too large; max 10MB")
+    
     logger.info("Processing audio processing request", extra={
         "endpoint": "/v1/process_audio",
         "filename": file.filename,
@@ -478,13 +512,12 @@ async def process_audio(
     })
     
     start_time = time()
-    file_content = await file.read()
     async with aiohttp.ClientSession() as session:
         try:
             form_data = aiohttp.FormData()
             form_data.add_field('file', file_content, filename=file.filename, content_type=file.content_type)
             
-            external_url = f"{settings.external_audio_proc_url}/process_audio/?language={language}"
+            external_url = f"{settings.external_audio_proc_url}/process_audio/?language={bleach.clean(language)}"
             async with session.post(
                 external_url,
                 data=form_data,
@@ -518,14 +551,22 @@ async def transcribe_audio(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
 ):
     user_id = await get_current_user(credentials)
-    start_time = time()
+    
+    allowed_types = ["audio/mpeg", "audio/wav", "audio/flac"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail=f"Invalid file type; allowed: {allowed_types}")
+    
     file_content = await file.read()
+    if len(file_content) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="File too large; max 10MB")
+    
+    start_time = time()
     async with aiohttp.ClientSession() as session:
         try:
             form_data = aiohttp.FormData()
             form_data.add_field('file', file_content, filename=file.filename, content_type=file.content_type)
             
-            external_url = f"{settings.external_asr_url}/transcribe/?language={language}"
+            external_url = f"{settings.external_asr_url}/transcribe/?language={bleach.clean(language)}"
             async with session.post(
                 external_url,
                 data=form_data,
@@ -560,8 +601,16 @@ async def chat_v2(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
 ):
     user_id = await get_current_user(credentials)
+    prompt = bleach.clean(prompt)  # Sanitize prompt
     if not prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+    
+    if image:
+        if image.content_type not in ["image/jpeg", "image/png"]:
+            raise HTTPException(status_code=400, detail="Invalid image type; allowed: jpeg, png")
+        image_content = await image.read()
+        if len(image_content) > 10 * 1024 * 1024:  # 10MB limit
+            raise HTTPException(status_code=400, detail="Image too large; max 10MB")
     
     logger.info("Processing chat_v2 request", extra={
         "endpoint": "/v1/chat_v2",
@@ -572,7 +621,7 @@ async def chat_v2(
     })
     
     try:
-        image_data = Image.open(await image.read()) if image else None
+        image_data = Image.open(io.BytesIO(image_content)) if image else None
         response_text = f"Processed: {prompt}" + (" with image" if image_data else "")
         return TranscriptionResponse(text=response_text)
     except Exception as e:
@@ -583,6 +632,10 @@ class TranslationRequest(BaseModel):
     sentences: List[str] = Field(..., description="List of sentences to translate")
     src_lang: str = Field(..., description="Source language code")
     tgt_lang: str = Field(..., description="Target language code")
+
+    @field_validator("sentences")
+    def sanitize_sentences(cls, v):
+        return [bleach.clean(sentence) for sentence in v]
 
     class Config:
         schema_extra = {
@@ -617,7 +670,7 @@ async def translate(
     user_id = await get_current_user(credentials)
     logger.info(f"Received translation request: {request.dict()}, user_id: {user_id}")
     
-    external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/translate?src_lang={request.src_lang}&tgt_lang={request.tgt_lang}"
+    external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/translate?src_lang={bleach.clean(request.src_lang)}&tgt_lang={bleach.clean(request.tgt_lang)}"
     
     payload = {
         "sentences": request.sentences,
@@ -661,6 +714,7 @@ class VisualQueryRequest(BaseModel):
 
     @field_validator("query")
     def query_must_be_valid(cls, v):
+        v = bleach.clean(v)  # Sanitize query
         if len(v) > 1000:
             raise ValueError("Query cannot exceed 1000 characters")
         return v.strip()
@@ -690,8 +744,16 @@ async def visual_query(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
 ):
     user_id = await get_current_user(credentials)
+    query = bleach.clean(query)  # Sanitize query
     if not query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
+    
+    if file.content_type not in ["image/jpeg", "image/png"]:
+        raise HTTPException(status_code=400, detail="Invalid image type; allowed: jpeg, png")
+    
+    file_content = await file.read()
+    if len(file_content) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="Image too large; max 10MB")
     
     logger.info("Processing visual query request", extra={
         "endpoint": "/v1/visual_query",
@@ -703,9 +765,8 @@ async def visual_query(
         "tgt_lang": tgt_lang
     })
     
-    external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/v1/visual_query/?src_lang={src_lang}&tgt_lang={tgt_lang}"
+    external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/v1/visual_query/?src_lang={bleach.clean(src_lang)}&tgt_lang={bleach.clean(tgt_lang)}"
     
-    file_content = await file.read()
     async with aiohttp.ClientSession() as session:
         try:
             form_data = aiohttp.FormData()
