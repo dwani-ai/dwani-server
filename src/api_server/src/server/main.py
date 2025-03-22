@@ -4,10 +4,11 @@ import os
 import shutil
 import sqlite3
 from time import time
-from typing import List, Optional
+from typing import List, Optional, Dict
 from abc import ABC, abstractmethod
-from functools import lru_cache  # Added for in-memory caching
+from functools import lru_cache
 import asyncio
+from collections import Counter  # Added for metrics
 
 import uvicorn
 import aiohttp
@@ -30,6 +31,16 @@ from config.logging_config import logger
 settings = Settings()
 DATABASE_URL = "sqlite:///users.db"
 database = Database(DATABASE_URL, min_size=5, max_size=20)
+
+# In-memory runtime configuration and metrics
+runtime_config = {
+    "chat_rate_limit": settings.chat_rate_limit,
+    "speech_rate_limit": settings.speech_rate_limit,
+}
+metrics = {
+    "request_count": Counter(),
+    "response_times": {}  # Endpoint -> List of response times
+}
 
 app = FastAPI(
     title="Dhwani API",
@@ -67,10 +78,17 @@ app.add_middleware(
 
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
+    start_time = time()
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Content-Security-Policy"] = "default-src 'self'"
+    
+    # Record metrics
+    endpoint = request.url.path
+    duration = time() - start_time
+    metrics["request_count"][endpoint] += 1
+    metrics["response_times"].setdefault(endpoint, []).append(duration)
     return response
 
 @app.exception_handler(Exception)
@@ -150,6 +168,10 @@ class BulkRegisterResponse(BaseModel):
             }
         }
 
+class ConfigUpdateRequest(BaseModel):
+    chat_rate_limit: Optional[str] = Field(None, description="Chat endpoint rate limit (e.g., '100/minute')")
+    speech_rate_limit: Optional[str] = Field(None, description="Speech endpoint rate limit (e.g., '5/minute')")
+
 tts_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 
 class TTSService(ABC):
@@ -181,11 +203,46 @@ def get_tts_service() -> TTSService:
 
 @app.get("/v1/health", 
          summary="Check API Health",
-         description="Returns the health status of the API and the current model in use.",
+         description="Returns detailed health status of the API, including database and external service connectivity.",
          tags=["Utility"],
          response_model=dict)
 async def health_check():
-    return {"status": "healthy", "model": settings.llm_model_name}
+    health_status = {"status": "healthy", "model": settings.llm_model_name}
+    
+    # Check database connectivity
+    try:
+        await database.fetch_one("SELECT 1")
+        health_status["database"] = "connected"
+    except Exception as e:
+        health_status["status"] = "unhealthy"
+        health_status["database"] = f"error: {str(e)}"
+        logger.error(f"Database health check failed: {str(e)}")
+    
+    # Check external TTS service
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(settings.external_tts_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                health_status["tts_service"] = "reachable" if resp.status < 400 else f"error: {resp.status}"
+    except Exception as e:
+        health_status["tts_service"] = f"error: {str(e)}"
+        logger.error(f"TTS service health check failed: {str(e)}")
+    
+    return health_status
+
+@app.get("/v1/metrics",
+         summary="Get API Metrics",
+         description="Returns basic request metrics (count and average response time per endpoint). Requires admin access.",
+         tags=["Utility"],
+         response_model=dict)
+async def get_metrics(current_user: str = Depends(get_current_user_with_admin)):
+    metrics_summary = {
+        "request_count": dict(metrics["request_count"]),
+        "average_response_times": {}
+    }
+    for endpoint, times in metrics["response_times"].items():
+        avg_time = sum(times) / len(times) if times else 0
+        metrics_summary["average_response_times"][endpoint] = f"{avg_time:.3f}s"
+    return metrics_summary
 
 @app.get("/",
          summary="Redirect to Docs",
@@ -246,7 +303,7 @@ async def process_bulk_users(csv_content: str, current_user: str, task_id: str):
     return result
 
 @app.post("/v1/register_bulk", 
-          response_model=dict,  # Changed to dict since it returns a message immediately
+          response_model=dict,
           summary="Register Multiple Users via CSV",
           description="Upload a CSV file with 'username' and 'password' columns to register multiple users in the background. Requires admin access. Rate limited to 10 requests per minute per user.",
           tags=["Authentication"],
@@ -275,7 +332,7 @@ async def register_bulk(
     
     try:
         csv_content = content.decode("utf-8")
-        task_id = str(time())  # Simple unique ID based on timestamp
+        task_id = str(time())
         background_tasks.add_task(process_bulk_users, csv_content, current_user, task_id)
         return {"message": "Bulk registration started", "task_id": task_id}
     except UnicodeDecodeError:
@@ -369,6 +426,37 @@ async def import_db(
         logger.error(f"Error importing database: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error importing database: {str(e)}")
 
+@app.post("/v1/update_config",
+          summary="Update Runtime Configuration",
+          description="Update rate limits dynamically. Requires admin access. Changes are in-memory and reset on restart.",
+          tags=["Utility"],
+          responses={
+              200: {"description": "Configuration updated successfully"},
+              400: {"description": "Invalid configuration values"},
+              401: {"description": "Unauthorized - Token required"},
+              403: {"description": "Admin access required"}
+          })
+async def update_config(
+    config_request: ConfigUpdateRequest,
+    current_user: str = Depends(get_current_user_with_admin)
+):
+    if config_request.chat_rate_limit:
+        try:
+            limiter._check_rate(config_request.chat_rate_limit)  # Validate format
+            runtime_config["chat_rate_limit"] = config_request.chat_rate_limit
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid chat_rate_limit format; use 'X/minute'")
+    
+    if config_request.speech_rate_limit:
+        try:
+            limiter._check_rate(config_request.speech_rate_limit)  # Validate format
+            runtime_config["speech_rate_limit"] = config_request.speech_rate_limit
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid speech_rate_limit format; use 'X/minute'")
+    
+    logger.info(f"Runtime config updated by {current_user}: {runtime_config}")
+    return {"message": "Configuration updated successfully", "current_config": runtime_config}
+
 @app.post("/v1/audio/speech",
           summary="Generate Speech from Text",
           description="Convert text to speech in the specified format using an external TTS service. Rate limited to 5 requests per minute per user. Requires authentication.",
@@ -381,7 +469,7 @@ async def import_db(
               503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "TTS service timeout"}
           })
-@limiter.limit(settings.speech_rate_limit)
+@limiter.limit(lambda: runtime_config["speech_rate_limit"])  # Use runtime config
 async def generate_audio(
     request: Request,
     speech_request: SpeechRequest = Depends(),
@@ -455,9 +543,8 @@ class ChatResponse(BaseModel):
 
 chat_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 
-@lru_cache(maxsize=100)  # In-memory cache for chat responses
+@lru_cache(maxsize=100)
 def cached_chat_response(prompt: str, src_lang: str) -> str:
-    # This is a placeholder; actual caching happens in the endpoint
     return None
 
 @app.post("/v1/chat", 
@@ -473,7 +560,7 @@ def cached_chat_response(prompt: str, src_lang: str) -> str:
               503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "Chat service timeout"}
           })
-@limiter.limit(settings.chat_rate_limit)
+@limiter.limit(lambda: runtime_config["chat_rate_limit"])  # Use runtime config
 @chat_breaker
 async def chat(
     request: Request,
@@ -484,7 +571,6 @@ async def chat(
     if not chat_request.prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
     
-    # Check cache
     cache_key = f"{chat_request.prompt}:{chat_request.src_lang}"
     cached_response = cached_chat_response(chat_request.prompt, chat_request.src_lang)
     if cached_response:
@@ -515,7 +601,6 @@ async def chat(
                     raise HTTPException(status_code=response.status, detail=await response.text())
                 response_data = await response.json()
                 response_text = response_data.get("response", "")
-                # Update cache (lru_cache handles this automatically)
                 cached_chat_response(chat_request.prompt, chat_request.src_lang)
                 logger.info(f"Generated Chat response from external API: {response_text}")
                 return ChatResponse(response=response_text)
