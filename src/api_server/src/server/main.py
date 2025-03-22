@@ -16,7 +16,7 @@ import requests
 from PIL import Image
 
 # Import from auth.py
-from utils.auth import get_current_user, get_current_user_with_admin, login, refresh_token, register, TokenResponse, Settings, LoginRequest, RegisterRequest, bearer_scheme
+from utils.auth import get_current_user, get_current_user_with_admin, login, refresh_token, register, TokenResponse, Settings, LoginRequest, RegisterRequest, bearer_scheme, register_bulk_users
 
 # Assuming these are in your project structure
 from config.tts_config import SPEED, ResponseFormat, config as tts_config
@@ -104,6 +104,18 @@ class AudioProcessingResponse(BaseModel):
     class Config:
         schema_extra = {"example": {"result": "Processed audio output"}} 
 
+class BulkRegisterResponse(BaseModel):
+    successful: List[str] = Field(..., description="List of successfully registered usernames")
+    failed: List[dict] = Field(..., description="List of failed registrations with reasons")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "successful": ["user1", "user2"],
+                "failed": [{"username": "user3", "reason": "Username already exists"}]
+            }
+        }
+
 # TTS Service Interface
 class TTSService(ABC):
     @abstractmethod
@@ -183,6 +195,40 @@ async def register_user(
     current_user: str = Depends(get_current_user_with_admin)
 ):
     return await register(register_request, current_user)
+
+@app.post("/v1/register_bulk", 
+          response_model=BulkRegisterResponse,
+          summary="Register Multiple Users via CSV",
+          description="Upload a CSV file with 'username' and 'password' columns to register multiple users. Requires admin access. Rate limited to 10 requests per minute per user.",
+          tags=["Authentication"],
+          responses={
+              200: {"description": "Bulk registration result", "model": BulkRegisterResponse},
+              400: {"description": "Invalid CSV format or data"},
+              401: {"description": "Unauthorized - Token required"},
+              403: {"description": "Admin access required"},
+              429: {"description": "Rate limit exceeded"}
+          })
+@limiter.limit("10/minute")
+async def register_bulk(
+    request: Request,
+    file: UploadFile = File(..., description="CSV file with 'username' and 'password' columns"),
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+):
+    current_user = await get_current_user_with_admin(credentials)
+    
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="File must be a CSV")
+    
+    try:
+        content = await file.read()
+        csv_content = content.decode("utf-8")
+        result = await register_bulk_users(csv_content, current_user)
+        return BulkRegisterResponse(**result)
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid CSV encoding; must be UTF-8")
+    except Exception as e:
+        logger.error(f"Bulk registration error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
 
 @app.post("/v1/audio/speech",
           summary="Generate Speech from Text",
