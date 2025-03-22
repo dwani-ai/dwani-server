@@ -7,25 +7,12 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 from config.logging_config import logger
-from sqlalchemy import create_engine, Column, String, Boolean
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 from passlib.context import CryptContext
 from cryptography.fernet import Fernet, InvalidToken
+from databases import Database  # Added for async database pooling
 
-# SQLite database setup
-DATABASE_URL = "sqlite:///users.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-Base = declarative_base()
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-class User(Base):
-    __tablename__ = "users"
-    username = Column(String, primary_key=True, index=True)
-    password = Column(String)  # Stores encrypted hashed passwords
-    is_admin = Column(Boolean, default=False)  # New admin flag
-
-Base.metadata.create_all(bind=engine)
+# Import database from main app (assuming it's in the same project structure)
+from your_main_app_file import database  # Replace with actual filename (e.g., main.py)
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -54,31 +41,34 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
 
 settings = Settings()
-fernet = Fernet(settings.encryption_key.encode())  # Initialize Fernet with the key from settings
+fernet = Fernet(settings.encryption_key.encode())
 
-# Seed initial data (optional)
-def seed_initial_data():
-    db = SessionLocal()
-    # Seed test user (non-admin)
-    if not db.query(User).filter_by(username="testuser").first():
+# Seed initial data (updated for async database)
+async def seed_initial_data():
+    # Check if test user exists
+    test_user = await database.fetch_one("SELECT username FROM users WHERE username = :username", {"username": "testuser"})
+    if not test_user:
         hashed_password = pwd_context.hash("password123")
         encrypted_password = fernet.encrypt(hashed_password.encode()).decode()
-        db.add(User(username="testuser", password=encrypted_password, is_admin=False))
-        db.commit()
-    # Seed admin user using environment variables
+        await database.execute(
+            "INSERT INTO users (username, password, is_admin) VALUES (:username, :password, :is_admin)",
+            {"username": "testuser", "password": encrypted_password, "is_admin": False}
+        )
+    
+    # Seed admin user
     admin_username = settings.default_admin_username
     admin_password = settings.default_admin_password
-    if not db.query(User).filter_by(username=admin_username).first():
+    admin_user = await database.fetch_one("SELECT username FROM users WHERE username = :username", {"username": admin_username})
+    if not admin_user:
         hashed_password = pwd_context.hash(admin_password)
         encrypted_password = fernet.encrypt(hashed_password.encode()).decode()
-        db.add(User(username=admin_username, password=encrypted_password, is_admin=True))
-        db.commit()
-    db.close()
+        await database.execute(
+            "INSERT INTO users (username, password, is_admin) VALUES (:username, :password, :is_admin)",
+            {"username": admin_username, "password": encrypted_password, "is_admin": True}
+        )
     logger.info(f"Seeded initial data: admin user '{admin_username}'")
 
-seed_initial_data()
-
-# Use HTTPBearer
+# HTTPBearer setup
 bearer_scheme = HTTPBearer()
 
 class TokenPayload(BaseModel):
@@ -121,9 +111,10 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
         token_data = TokenPayload(**payload)
         user_id = token_data.sub
         
-        db = SessionLocal()
-        user = db.query(User).filter_by(username=user_id).first()
-        db.close()
+        user = await database.fetch_one(
+            "SELECT username FROM users WHERE username = :username",
+            {"username": user_id}
+        )
         if user_id is None or not user:
             logger.warning(f"Invalid or unknown user: {user_id}")
             raise credentials_exception
@@ -151,87 +142,90 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
 
 async def get_current_user_with_admin(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
     user_id = await get_current_user(credentials)
-    db = SessionLocal()
-    user = db.query(User).filter_by(username=user_id).first()
-    db.close()
-    if not user or not user.is_admin:
+    user = await database.fetch_one(
+        "SELECT is_admin FROM users WHERE username = :username",
+        {"username": user_id}
+    )
+    if not user or not user["is_admin"]:
         logger.warning(f"User {user_id} is not authorized as admin")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return user_id
 
 async def login(login_request: LoginRequest) -> TokenResponse:
-    db = SessionLocal()
-    user = db.query(User).filter_by(username=login_request.username).first()
-    db.close()
+    user = await database.fetch_one(
+        "SELECT username, password FROM users WHERE username = :username",
+        {"username": login_request.username}
+    )
     if not user:
         logger.warning(f"Login failed for user: {login_request.username} - User not found")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
     
     try:
-        decrypted_password = fernet.decrypt(user.password.encode()).decode()
+        decrypted_password = fernet.decrypt(user["password"].encode()).decode()
         if not pwd_context.verify(login_request.password, decrypted_password):
             logger.warning(f"Login failed for user: {login_request.username} - Invalid password")
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
     except InvalidToken:
         logger.error(f"Decryption failed for user: {login_request.username}")
-        raise HTTPException(status_code=status.HTTP_500_UNAUTHORIZED, detail="Internal server error - decryption failed")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error - decryption failed")
     
-    tokens = await create_access_token(user_id=user.username)
+    tokens = await create_access_token(user_id=user["username"])
     return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
 
 async def register(register_request: RegisterRequest, current_user: str = Depends(get_current_user_with_admin)) -> TokenResponse:
-    db = SessionLocal()
-    existing_user = db.query(User).filter_by(username=register_request.username).first()
+    existing_user = await database.fetch_one(
+        "SELECT username FROM users WHERE username = :username",
+        {"username": register_request.username}
+    )
     if existing_user:
-        db.close()
         logger.warning(f"Registration failed: Username {register_request.username} already exists")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already exists")
     
     hashed_password = pwd_context.hash(register_request.password)
     encrypted_password = fernet.encrypt(hashed_password.encode()).decode()
-    new_user = User(username=register_request.username, password=encrypted_password, is_admin=False)
-    db.add(new_user)
-    db.commit()
-    db.close()
+    await database.execute(
+        "INSERT INTO users (username, password, is_admin) VALUES (:username, :password, :is_admin)",
+        {"username": register_request.username, "password": encrypted_password, "is_admin": False}
+    )
     
     tokens = await create_access_token(user_id=register_request.username)
     logger.info(f"Registered and generated token for user: {register_request.username} by admin {current_user}")
     return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
 
 async def register_bulk_users(csv_content: str, current_user: str) -> dict:
-    db = SessionLocal()
     result = {"successful": [], "failed": []}
     
-    # Parse CSV content
     csv_reader = csv.DictReader(StringIO(csv_content))
     if not {"username", "password"}.issubset(csv_reader.fieldnames):
-        db.close()
         raise HTTPException(status_code=400, detail="CSV must contain 'username' and 'password' columns")
     
-    for row in csv_reader:
-        username = row["username"].strip()
-        password = row["password"].strip()
-        
-        if not username or not password:
-            result["failed"].append({"username": username, "reason": "Empty username or password"})
-            continue
-        
-        existing_user = db.query(User).filter_by(username=username).first()
-        if existing_user:
-            result["failed"].append({"username": username, "reason": "Username already exists"})
-            continue
-        
-        try:
-            hashed_password = pwd_context.hash(password)
-            encrypted_password = fernet.encrypt(hashed_password.encode()).decode()
-            new_user = User(username=username, password=encrypted_password, is_admin=False)
-            db.add(new_user)
-            result["successful"].append(username)
-        except Exception as e:
-            result["failed"].append({"username": username, "reason": str(e)})
-    
-    db.commit()
-    db.close()
+    async with database.transaction():
+        for row in csv_reader:
+            username = row["username"].strip()
+            password = row["password"].strip()
+            
+            if not username or not password:
+                result["failed"].append({"username": username, "reason": "Empty username or password"})
+                continue
+            
+            existing_user = await database.fetch_one(
+                "SELECT username FROM users WHERE username = :username",
+                {"username": username}
+            )
+            if existing_user:
+                result["failed"].append({"username": username, "reason": "Username already exists"})
+                continue
+            
+            try:
+                hashed_password = pwd_context.hash(password)
+                encrypted_password = fernet.encrypt(hashed_password.encode()).decode()
+                await database.execute(
+                    "INSERT INTO users (username, password, is_admin) VALUES (:username, :password, :is_admin)",
+                    {"username": username, "password": encrypted_password, "is_admin": False}
+                )
+                result["successful"].append(username)
+            except Exception as e:
+                result["failed"].append({"username": username, "reason": str(e)})
     
     logger.info(f"Bulk registration by {current_user}: {len(result['successful'])} succeeded, {len(result['failed'])} failed")
     return result
@@ -244,9 +238,10 @@ async def refresh_token(credentials: HTTPAuthorizationCredentials = Depends(bear
         if payload.get("type") != "refresh":
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type; refresh token required")
         user_id = token_data.sub
-        db = SessionLocal()
-        user = db.query(User).filter_by(username=user_id).first()
-        db.close()
+        user = await database.fetch_one(
+            "SELECT username FROM users WHERE username = :username",
+            {"username": user_id}
+        )
         if not user:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
         if datetime.utcnow().timestamp() > token_data.exp:
