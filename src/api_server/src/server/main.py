@@ -8,6 +8,7 @@ from typing import List, Optional
 from abc import ABC, abstractmethod
 
 import uvicorn
+import aiohttp  # Added for async HTTP requests
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, FileResponse
@@ -15,7 +16,6 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, field_validator, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-import requests
 from PIL import Image
 
 # Import from auth.py
@@ -27,7 +27,6 @@ from config.logging_config import logger
 
 settings = Settings()
 
-# FastAPI app setup with enhanced docs
 app = FastAPI(
     title="Dhwani API",
     description="A multilingual AI-powered API supporting Indian languages for chat, text-to-speech, audio processing, and transcription. "
@@ -54,7 +53,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Rate limiting based on user_id
 limiter = Limiter(key_func=lambda request: get_current_user(request.scope.get("route").dependencies))
 
 # Request/Response Models
@@ -122,23 +120,26 @@ class BulkRegisterResponse(BaseModel):
 # TTS Service Interface
 class TTSService(ABC):
     @abstractmethod
-    async def generate_speech(self, payload: dict) -> requests.Response:
+    async def generate_speech(self, payload: dict) -> aiohttp.ClientResponse:
         pass
 
 class ExternalTTSService(TTSService):
-    async def generate_speech(self, payload: dict) -> requests.Response:
-        try:
-            return requests.post(
-                settings.external_tts_url,
-                json=payload,
-                headers={"accept": "application/json", "Content-Type": "application/json"},
-                stream=True,
-                timeout=60
-            )
-        except requests.Timeout:
-            raise HTTPException(status_code=504, detail="External TTS API timeout")
-        except requests.RequestException as e:
-            raise HTTPException(status_code=500, detail=f"External TTS API error: {str(e)}")
+    async def generate_speech(self, payload: dict) -> aiohttp.ClientResponse:
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(
+                    settings.external_tts_url,
+                    json=payload,
+                    headers={"accept": "application/json", "Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=60)
+                ) as response:
+                    if response.status >= 400:
+                        raise HTTPException(status_code=response.status, detail=await response.text())
+                    return response
+            except aiohttp.ClientTimeout:
+                raise HTTPException(status_code=504, detail="External TTS API timeout")
+            except aiohttp.ClientError as e:
+                raise HTTPException(status_code=500, detail=f"External TTS API error: {str(e)}")
 
 def get_tts_service() -> TTSService:
     return ExternalTTSService()
@@ -280,12 +281,10 @@ async def import_db(
     temp_path = "users_temp.db"
     
     try:
-        # Save the uploaded file temporarily
         content = await file.read()
         with open(temp_path, "wb") as f:
             f.write(content)
         
-        # Validate the uploaded file is a valid SQLite database
         conn = sqlite3.connect(temp_path)
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users';")
@@ -294,7 +293,6 @@ async def import_db(
             os.remove(temp_path)
             raise HTTPException(status_code=400, detail="Uploaded file is not a valid user database")
         
-        # Check if the schema matches (basic validation)
         cursor.execute("PRAGMA table_info(users);")
         columns = [col[1] for col in cursor.fetchall()]
         expected_columns = ["username", "password", "is_admin"]
@@ -305,7 +303,6 @@ async def import_db(
         
         conn.close()
         
-        # Replace the current database
         shutil.move(temp_path, db_path)
         logger.info(f"Database imported successfully by admin: {current_user}")
         return {"message": "Database imported successfully"}
@@ -359,7 +356,6 @@ async def generate_audio(
     }
     
     response = await tts_service.generate_speech(payload)
-    response.raise_for_status()
     
     headers = {
         "Content-Disposition": f"inline; filename=\"speech.{speech_request.response_format.value}\"",
@@ -367,8 +363,12 @@ async def generate_audio(
         "Content-Type": f"audio/{speech_request.response_format.value}"
     }
     
+    async def stream_response():
+        async for chunk in response.content.iter_chunked(8192):
+            yield chunk
+    
     return StreamingResponse(
-        response.iter_content(chunk_size=8192),
+        stream_response(),
         media_type=f"audio/{speech_request.response_format.value}",
         headers=headers
     )
@@ -420,39 +420,36 @@ async def chat(
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
     logger.info(f"Received prompt: {chat_request.prompt}, src_lang: {chat_request.src_lang}, user_id: {user_id}")
     
-    try:
-        external_url = "https://slabstech-dhwani-internal-api-server.hf.space/v1/chat"
-        payload = {
-            "prompt": chat_request.prompt,
-            "src_lang": chat_request.src_lang,
-            "tgt_lang": chat_request.src_lang
-        }
-        
-        response = requests.post(
-            external_url,
-            json=payload,
-            headers={
-                "accept": "application/json",
-                "Content-Type": "application/json"
-            },
-            timeout=60
-        )
-        response.raise_for_status()
-        
-        response_data = response.json()
-        response_text = response_data.get("response", "")
-        logger.info(f"Generated Chat response from external API: {response_text}")
-        return ChatResponse(response=response_text)
+    external_url = "https://slabstech-dhwani-internal-api-server.hf.space/v1/chat"
+    payload = {
+        "prompt": chat_request.prompt,
+        "src_lang": chat_request.src_lang,
+        "tgt_lang": chat_request.src_lang
+    }
     
-    except requests.Timeout:
-        logger.error("External chat API request timed out")
-        raise HTTPException(status_code=504, detail="Chat service timeout")
-    except requests.RequestException as e:
-        logger.error(f"Error calling external chat API: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
-    except Exception as e:
-        logger.error(f"Error processing request: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(
+                external_url,
+                json=payload,
+                headers={
+                    "accept": "application/json",
+                    "Content-Type": "application/json"
+                },
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+                if response.status >= 400:
+                    raise HTTPException(status_code=response.status, detail=await response.text())
+                response_data = await response.json()
+                response_text = response_data.get("response", "")
+                logger.info(f"Generated Chat response from external API: {response_text}")
+                return ChatResponse(response=response_text)
+        except aiohttp.ClientTimeout:
+            logger.error("External chat API request timed out")
+            raise HTTPException(status_code=504, detail="Chat service timeout")
+        except aiohttp.ClientError as e:
+            logger.error(f"Error calling external chat API: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
 @app.post("/v1/process_audio/", 
           response_model=AudioProcessingResponse,
@@ -481,28 +478,29 @@ async def process_audio(
     })
     
     start_time = time()
-    try:
-        file_content = await file.read()
-        files = {"file": (file.filename, file_content, file.content_type)}
-        
-        external_url = f"{settings.external_audio_proc_url}/process_audio/?language={language}"
-        response = requests.post(
-            external_url,
-            files=files,
-            headers={"accept": "application/json"},
-            timeout=60
-        )
-        response.raise_for_status()
-        
-        processed_result = response.json().get("result", "")
-        logger.info(f"Audio processing completed in {time() - start_time:.2f} seconds")
-        return AudioProcessingResponse(result=processed_result)
-    
-    except requests.Timeout:
-        raise HTTPException(status_code=504, detail="Audio processing service timeout")
-    except requests.RequestException as e:
-        logger.error(f"Audio processing request failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Audio processing failed: {str(e)}")
+    file_content = await file.read()
+    async with aiohttp.ClientSession() as session:
+        try:
+            form_data = aiohttp.FormData()
+            form_data.add_field('file', file_content, filename=file.filename, content_type=file.content_type)
+            
+            external_url = f"{settings.external_audio_proc_url}/process_audio/?language={language}"
+            async with session.post(
+                external_url,
+                data=form_data,
+                headers={"accept": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+                if response.status >= 400:
+                    raise HTTPException(status_code=response.status, detail=await response.text())
+                processed_result = (await response.json()).get("result", "")
+                logger.info(f"Audio processing completed in {time() - start_time:.2f} seconds")
+                return AudioProcessingResponse(result=processed_result)
+        except aiohttp.ClientTimeout:
+            raise HTTPException(status_code=504, detail="Audio processing service timeout")
+        except aiohttp.ClientError as e:
+            logger.error(f"Audio processing request failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Audio processing failed: {str(e)}")
 
 @app.post("/v1/transcribe/", 
           response_model=TranscriptionResponse,
@@ -521,26 +519,27 @@ async def transcribe_audio(
 ):
     user_id = await get_current_user(credentials)
     start_time = time()
-    try:
-        file_content = await file.read()
-        files = {"file": (file.filename, file_content, file.content_type)}
-        
-        external_url = f"{settings.external_asr_url}/transcribe/?language={language}"
-        response = requests.post(
-            external_url,
-            files=files,
-            headers={"accept": "application/json"},
-            timeout=60
-        )
-        response.raise_for_status()
-        
-        transcription = response.json().get("text", "")
-        return TranscriptionResponse(text=transcription)
-    
-    except requests.Timeout:
-        raise HTTPException(status_code=504, detail="Transcription service timeout")
-    except requests.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+    file_content = await file.read()
+    async with aiohttp.ClientSession() as session:
+        try:
+            form_data = aiohttp.FormData()
+            form_data.add_field('file', file_content, filename=file.filename, content_type=file.content_type)
+            
+            external_url = f"{settings.external_asr_url}/transcribe/?language={language}"
+            async with session.post(
+                external_url,
+                data=form_data,
+                headers={"accept": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+                if response.status >= 400:
+                    raise HTTPException(status_code=response.status, detail=await response.text())
+                transcription = (await response.json()).get("text", "")
+                return TranscriptionResponse(text=transcription)
+        except aiohttp.ClientTimeout:
+            raise HTTPException(status_code=504, detail="Transcription service timeout")
+        except aiohttp.ClientError as e:
+            raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 @app.post("/v1/chat_v2", 
           response_model=TranscriptionResponse,
@@ -626,37 +625,34 @@ async def translate(
         "tgt_lang": request.tgt_lang
     }
     
-    try:
-        response = requests.post(
-            external_url,
-            json=payload,
-            headers={
-                "accept": "application/json",
-                "Content-Type": "application/json"
-            },
-            timeout=60
-        )
-        response.raise_for_status()
-        
-        response_data = response.json()
-        translations = response_data.get("translations", [])
-        
-        if not translations or len(translations) != len(request.sentences):
-            logger.warning(f"Unexpected response format: {response_data}")
-            raise HTTPException(status_code=500, detail="Invalid response from translation service")
-        
-        logger.info(f"Translation successful: {translations}")
-        return TranslationResponse(translations=translations)
-    
-    except requests.Timeout:
-        logger.error("Translation request timed out")
-        raise HTTPException(status_code=504, detail="Translation service timeout")
-    except requests.RequestException as e:
-        logger.error(f"Error during translation: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
-    except ValueError as e:
-        logger.error(f"Invalid JSON response: {str(e)}")
-        raise HTTPException(status_code=500, detail="Invalid response format from translation service")
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(
+                external_url,
+                json=payload,
+                headers={
+                    "accept": "application/json",
+                    "Content-Type": "application/json"
+                },
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+                if response.status >= 400:
+                    raise HTTPException(status_code=response.status, detail=await response.text())
+                response_data = await response.json()
+                translations = response_data.get("translations", [])
+                
+                if not translations or len(translations) != len(request.sentences):
+                    logger.warning(f"Unexpected response format: {response_data}")
+                    raise HTTPException(status_code=500, detail="Invalid response from translation service")
+                
+                logger.info(f"Translation successful: {translations}")
+                return TranslationResponse(translations=translations)
+        except aiohttp.ClientTimeout:
+            logger.error("Translation request timed out")
+            raise HTTPException(status_code=504, detail="Translation service timeout")
+        except aiohttp.ClientError as e:
+            logger.error(f"Error during translation: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
 
 class VisualQueryRequest(BaseModel):
     query: str
@@ -709,39 +705,36 @@ async def visual_query(
     
     external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/v1/visual_query/?src_lang={src_lang}&tgt_lang={tgt_lang}"
     
-    try:
-        file_content = await file.read()
-        files = {"file": (file.filename, file_content, file.content_type)}
-        data = {"query": query}
-        
-        response = requests.post(
-            external_url,
-            files=files,
-            data=data,
-            headers={"accept": "application/json"},
-            timeout=60
-        )
-        response.raise_for_status()
-        
-        response_data = response.json()
-        answer = response_data.get("answer", "")
-        
-        if not answer:
-            logger.warning(f"Empty answer received from external API: {response_data}")
-            raise HTTPException(status_code=500, detail="No answer provided by visual query service")
-        
-        logger.info(f"Visual query successful: {answer}")
-        return VisualQueryResponse(answer=answer)
-    
-    except requests.Timeout:
-        logger.error("Visual query request timed out")
-        raise HTTPException(status_code=504, detail="Visual query service timeout")
-    except requests.RequestException as e:
-        logger.error(f"Error during visual query: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Visual query failed: {str(e)}")
-    except ValueError as e:
-        logger.error(f"Invalid JSON response: {str(e)}")
-        raise HTTPException(status_code=500, detail="Invalid response format from visual query service")
+    file_content = await file.read()
+    async with aiohttp.ClientSession() as session:
+        try:
+            form_data = aiohttp.FormData()
+            form_data.add_field('file', file_content, filename=file.filename, content_type=file.content_type)
+            form_data.add_field('query', query)
+            
+            async with session.post(
+                external_url,
+                data=form_data,
+                headers={"accept": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+                if response.status >= 400:
+                    raise HTTPException(status_code=response.status, detail=await response.text())
+                response_data = await response.json()
+                answer = response_data.get("answer", "")
+                
+                if not answer:
+                    logger.warning(f"Empty answer received from external API: {response_data}")
+                    raise HTTPException(status_code=500, detail="No answer provided by visual query service")
+                
+                logger.info(f"Visual query successful: {answer}")
+                return VisualQueryResponse(answer=answer)
+        except aiohttp.ClientTimeout:
+            logger.error("Visual query request timed out")
+            raise HTTPException(status_code=504, detail="Visual query service timeout")
+        except aiohttp.ClientError as e:
+            logger.error(f"Error during visual query: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Visual query failed: {str(e)}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the FastAPI server.")
