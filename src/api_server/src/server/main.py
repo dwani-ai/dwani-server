@@ -9,7 +9,8 @@ from abc import ABC, abstractmethod
 
 import uvicorn
 import aiohttp
-import bleach  # Added for input sanitization
+import bleach
+from databases import Database  # Added for database pooling
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Form, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, FileResponse
@@ -17,6 +18,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, field_validator, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from pybreaker import CircuitBreaker  # Added for circuit breakers
 from PIL import Image
 
 from utils.auth import get_current_user, get_current_user_with_admin, login, refresh_token, register, TokenResponse, Settings, LoginRequest, RegisterRequest, bearer_scheme, register_bulk_users
@@ -24,6 +26,10 @@ from config.tts_config import SPEED, ResponseFormat, config as tts_config
 from config.logging_config import logger
 
 settings = Settings()
+
+# Database pooling setup
+DATABASE_URL = "sqlite:///users.db"
+database = Database(DATABASE_URL, min_size=5, max_size=20)
 
 app = FastAPI(
     title="Dhwani API",
@@ -43,16 +49,25 @@ app = FastAPI(
     ],
 )
 
-# Secure CORS configuration (restricted in production)
+# Startup and shutdown events for database pooling
+@app.on_event("startup")
+async def startup():
+    await database.connect()
+
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
+
+# Secure CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with specific domains in production, e.g., ["https://trusted.domain.com"]
+    allow_origins=["*"],  # Replace with specific domains in production
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Add security headers middleware
+# Security headers middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
@@ -61,7 +76,20 @@ async def add_security_headers(request: Request, call_next):
     response.headers["Content-Security-Policy"] = "default-src 'self'"
     return response
 
-# Rate limiter with IP-based key for login
+# Global exception handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled error: {str(exc)}", exc_info=True, extra={
+        "endpoint": request.url.path,
+        "method": request.method,
+        "client_ip": get_remote_address(request)
+    })
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"}
+    )
+
+# Rate limiter with IP-based key
 limiter = Limiter(key_func=lambda request: get_remote_address(request))
 
 # Request/Response Models
@@ -74,7 +102,7 @@ class SpeechRequest(BaseModel):
 
     @field_validator("input")
     def input_must_be_valid(cls, v):
-        v = bleach.clean(v)  # Sanitize input
+        v = bleach.clean(v)
         if len(v) > 1000:
             raise ValueError("Input cannot exceed 1000 characters")
         return v.strip()
@@ -127,12 +155,16 @@ class BulkRegisterResponse(BaseModel):
             }
         }
 
+# Circuit breaker for external services
+tts_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
+
 class TTSService(ABC):
     @abstractmethod
     async def generate_speech(self, payload: dict) -> aiohttp.ClientResponse:
         pass
 
 class ExternalTTSService(TTSService):
+    @tts_breaker
     async def generate_speech(self, payload: dict) -> aiohttp.ClientResponse:
         async with aiohttp.ClientSession() as session:
             try:
@@ -176,11 +208,10 @@ async def home():
           responses={
               200: {"description": "Successful login", "model": TokenResponse},
               401: {"description": "Invalid username or password"},
-              429: {"description": "Too many login attempts"}  # Added for rate limiting
+              429: {"description": "Too many login attempts"}
           })
-@limiter.limit("5/minute")  # Rate limit login attempts to 5 per minute per IP
+@limiter.limit("5/minute")
 async def token(request: Request, login_request: LoginRequest):
-    # Sanitize username and password
     login_request.username = bleach.clean(login_request.username)
     login_request.password = bleach.clean(login_request.password)
     return await login(login_request)
@@ -211,7 +242,6 @@ async def register_user(
     register_request: RegisterRequest,
     current_user: str = Depends(get_current_user_with_admin)
 ):
-    # Sanitize username and password
     register_request.username = bleach.clean(register_request.username)
     register_request.password = bleach.clean(register_request.password)
     return await register(register_request, current_user)
@@ -236,13 +266,11 @@ async def register_bulk(
 ):
     current_user = await get_current_user_with_admin(credentials)
     
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(status_code=400, detail="File must be a CSV")
-    if file.content_type != "text/csv":
+    if not file.filename.endswith('.csv') or file.content_type != "text/csv":
         raise HTTPException(status_code=400, detail="Invalid file type; only CSV allowed")
     
     content = await file.read()
-    if len(content) > 10 * 1024 * 1024:  # 10MB limit
+    if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large; max 10MB")
     
     try:
@@ -302,30 +330,31 @@ async def import_db(
     temp_path = "users_temp.db"
     
     content = await file.read()
-    if len(content) > 10 * 1024 * 1024:  # 10MB limit
+    if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large; max 10MB")
     
     try:
         with open(temp_path, "wb") as f:
             f.write(content)
         
-        conn = sqlite3.connect(temp_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users';")
-        if not cursor.fetchone():
+        async with database.transaction():
+            conn = sqlite3.connect(temp_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users';")
+            if not cursor.fetchone():
+                conn.close()
+                os.remove(temp_path)
+                raise HTTPException(status_code=400, detail="Uploaded file is not a valid user database")
+            
+            cursor.execute("PRAGMA table_info(users);")
+            columns = [col[1] for col in cursor.fetchall()]
+            expected_columns = ["username", "password", "is_admin"]
+            if not all(col in columns for col in expected_columns):
+                conn.close()
+                os.remove(temp_path)
+                raise HTTPException(status_code=400, detail="Uploaded database has an incompatible schema")
+            
             conn.close()
-            os.remove(temp_path)
-            raise HTTPException(status_code=400, detail="Uploaded file is not a valid user database")
-        
-        cursor.execute("PRAGMA table_info(users);")
-        columns = [col[1] for col in cursor.fetchall()]
-        expected_columns = ["username", "password", "is_admin"]
-        if not all(col in columns for col in expected_columns):
-            conn.close()
-            os.remove(temp_path)
-            raise HTTPException(status_code=400, detail="Uploaded database has an incompatible schema")
-        
-        conn.close()
         
         shutil.move(temp_path, db_path)
         logger.info(f"Database imported successfully by admin: {current_user}")
@@ -351,6 +380,7 @@ async def import_db(
               400: {"description": "Invalid input"},
               401: {"description": "Unauthorized - Token required"},
               429: {"description": "Rate limit exceeded"},
+              503: {"description": "Service unavailable due to repeated failures"},  # Added for circuit breaker
               504: {"description": "TTS service timeout"}
           })
 @limiter.limit(settings.speech_rate_limit)
@@ -373,13 +403,16 @@ async def generate_audio(
     
     payload = {
         "input": speech_request.input,
-        "voice": bleach.clean(speech_request.voice),  # Sanitize voice
-        "model": bleach.clean(speech_request.model),  # Sanitize model
+        "voice": bleach.clean(speech_request.voice),
+        "model": bleach.clean(speech_request.model),
         "response_format": speech_request.response_format.value,
         "speed": speech_request.speed
     }
     
-    response = await tts_service.generate_speech(payload)
+    try:
+        response = await tts_service.generate_speech(payload)
+    except tts_breaker.BreakerOpen:
+        raise HTTPException(status_code=503, detail="TTS service temporarily unavailable")
     
     headers = {
         "Content-Disposition": f"inline; filename=\"speech.{speech_request.response_format.value}\"",
@@ -403,7 +436,7 @@ class ChatRequest(BaseModel):
 
     @field_validator("prompt")
     def prompt_must_be_valid(cls, v):
-        v = bleach.clean(v)  # Sanitize prompt
+        v = bleach.clean(v)
         if len(v) > 1000:
             raise ValueError("Prompt cannot exceed 1000 characters")
         return v.strip()
@@ -422,6 +455,9 @@ class ChatResponse(BaseModel):
     class Config:
         schema_extra = {"example": {"response": "Hi there, I'm doing great!"}} 
 
+# Circuit breaker for chat service
+chat_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
+
 @app.post("/v1/chat", 
           response_model=ChatResponse,
           summary="Chat with AI",
@@ -432,9 +468,11 @@ class ChatResponse(BaseModel):
               400: {"description": "Invalid prompt"},
               401: {"description": "Unauthorized - Token required"},
               429: {"description": "Rate limit exceeded"},
+              503: {"description": "Service unavailable due to repeated failures"},  # Added for circuit breaker
               504: {"description": "Chat service timeout"}
           })
 @limiter.limit(settings.chat_rate_limit)
+@chat_breaker
 async def chat(
     request: Request,
     chat_request: ChatRequest,
@@ -476,6 +514,9 @@ async def chat(
             logger.error(f"Error calling external chat API: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
+# Circuit breaker for audio processing
+audio_proc_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
+
 @app.post("/v1/process_audio/", 
           response_model=AudioProcessingResponse,
           summary="Process Audio File",
@@ -485,9 +526,11 @@ async def chat(
               200: {"description": "Processed result", "model": AudioProcessingResponse},
               401: {"description": "Unauthorized - Token required"},
               429: {"description": "Rate limit exceeded"},
+              503: {"description": "Service unavailable due to repeated failures"},  # Added for circuit breaker
               504: {"description": "Audio processing timeout"}
           })
 @limiter.limit(settings.chat_rate_limit)
+@audio_proc_breaker
 async def process_audio(
     request: Request,
     file: UploadFile = File(..., description="Audio file to process"),
@@ -501,7 +544,7 @@ async def process_audio(
         raise HTTPException(status_code=400, detail=f"Invalid file type; allowed: {allowed_types}")
     
     file_content = await file.read()
-    if len(file_content) > 10 * 1024 * 1024:  # 10MB limit
+    if len(file_content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large; max 10MB")
     
     logger.info("Processing audio processing request", extra={
@@ -535,6 +578,9 @@ async def process_audio(
             logger.error(f"Audio processing request failed: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Audio processing failed: {str(e)}")
 
+# Circuit breaker for transcription
+transcribe_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
+
 @app.post("/v1/transcribe/", 
           response_model=TranscriptionResponse,
           summary="Transcribe Audio File",
@@ -543,8 +589,10 @@ async def process_audio(
           responses={
               200: {"description": "Transcription result", "model": TranscriptionResponse},
               401: {"description": "Unauthorized - Token required"},
+              503: {"description": "Service unavailable due to repeated failures"},  # Added for circuit breaker
               504: {"description": "Transcription service timeout"}
           })
+@transcribe_breaker
 async def transcribe_audio(
     file: UploadFile = File(..., description="Audio file to transcribe"),
     language: str = Query(..., enum=["kannada", "hindi", "tamil"], description="Language of the audio"),
@@ -557,7 +605,7 @@ async def transcribe_audio(
         raise HTTPException(status_code=400, detail=f"Invalid file type; allowed: {allowed_types}")
     
     file_content = await file.read()
-    if len(file_content) > 10 * 1024 * 1024:  # 10MB limit
+    if len(file_content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large; max 10MB")
     
     start_time = time()
@@ -601,7 +649,7 @@ async def chat_v2(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
 ):
     user_id = await get_current_user(credentials)
-    prompt = bleach.clean(prompt)  # Sanitize prompt
+    prompt = bleach.clean(prompt)
     if not prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
     
@@ -609,7 +657,7 @@ async def chat_v2(
         if image.content_type not in ["image/jpeg", "image/png"]:
             raise HTTPException(status_code=400, detail="Invalid image type; allowed: jpeg, png")
         image_content = await image.read()
-        if len(image_content) > 10 * 1024 * 1024:  # 10MB limit
+        if len(image_content) > 10 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="Image too large; max 10MB")
     
     logger.info("Processing chat_v2 request", extra={
@@ -652,6 +700,9 @@ class TranslationResponse(BaseModel):
     class Config:
         schema_extra = {"example": {"translations": ["ನಮಸ್ಕಾರ", "ನೀವು ಹೇಗಿದ್ದೀರಿ?"]}} 
 
+# Circuit breaker for translation
+translate_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
+
 @app.post("/v1/translate", 
           response_model=TranslationResponse,
           summary="Translate Text",
@@ -661,8 +712,10 @@ class TranslationResponse(BaseModel):
               200: {"description": "Translation result", "model": TranslationResponse},
               401: {"description": "Unauthorized - Token required"},
               500: {"description": "Translation service error"},
+              503: {"description": "Service unavailable due to repeated failures"},  # Added for circuit breaker
               504: {"description": "Translation service timeout"}
           })
+@translate_breaker
 async def translate(
     request: TranslationRequest,
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
@@ -709,18 +762,21 @@ async def translate(
 
 class VisualQueryRequest(BaseModel):
     query: str
-    src_lang: str = "kan_Knda"  # Default to Kannada
-    tgt_lang: str = "kan_Knda"  # Default to Kannada
+    src_lang: str = "kan_Knda"
+    tgt_lang: str = "kan_Knda"
 
     @field_validator("query")
     def query_must_be_valid(cls, v):
-        v = bleach.clean(v)  # Sanitize query
+        v = bleach.clean(v)
         if len(v) > 1000:
             raise ValueError("Query cannot exceed 1000 characters")
         return v.strip()
 
 class VisualQueryResponse(BaseModel):
     answer: str
+
+# Circuit breaker for visual query
+visual_query_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 
 @app.post("/v1/visual_query", 
           response_model=VisualQueryResponse,
@@ -732,9 +788,11 @@ class VisualQueryResponse(BaseModel):
               400: {"description": "Invalid query"},
               401: {"description": "Unauthorized - Token required"},
               429: {"description": "Rate limit exceeded"},
+              503: {"description": "Service unavailable due to repeated failures"},  # Added for circuit breaker
               504: {"description": "Visual query service timeout"}
           })
 @limiter.limit(settings.chat_rate_limit)
+@visual_query_breaker
 async def visual_query(
     request: Request,
     query: str = Form(..., description="Text query for the visual content"),
@@ -744,7 +802,7 @@ async def visual_query(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
 ):
     user_id = await get_current_user(credentials)
-    query = bleach.clean(query)  # Sanitize query
+    query = bleach.clean(query)
     if not query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
     
@@ -752,7 +810,7 @@ async def visual_query(
         raise HTTPException(status_code=400, detail="Invalid image type; allowed: jpeg, png")
     
     file_content = await file.read()
-    if len(file_content) > 10 * 1024 * 1024:  # 10MB limit
+    if len(file_content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Image too large; max 10MB")
     
     logger.info("Processing visual query request", extra={

@@ -8,3 +8,5 @@ pillow
 cryptography
 aiohttp
 bleach
+databases[sqlite]
+pybreaker
