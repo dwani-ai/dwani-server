@@ -1,3 +1,8 @@
+# src/server/main.py
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 import argparse
 import io
 import os
@@ -9,6 +14,7 @@ from abc import ABC, abstractmethod
 from functools import lru_cache
 import asyncio
 from collections import Counter
+from contextlib import asynccontextmanager
 
 import uvicorn
 import aiohttp
@@ -24,15 +30,13 @@ from slowapi.util import get_remote_address
 from pybreaker import CircuitBreaker
 from PIL import Image
 
-from utils.auth import get_current_user, get_current_user_with_admin, login, refresh_token, register, TokenResponse, Settings, LoginRequest, RegisterRequest, bearer_scheme, register_bulk_users
+from utils.auth import get_current_user, get_current_user_with_admin, login, refresh_token, register, TokenResponse, Settings, LoginRequest, RegisterRequest, bearer_scheme, register_bulk_users, seed_initial_data
 from config.tts_config import SPEED, ResponseFormat, config as tts_config
 from config.logging_config import logger
+from src.server.db import database
 
 settings = Settings()
-DATABASE_URL = "sqlite:///users.db"
-database = Database(DATABASE_URL, min_size=5, max_size=20)
 
-# In-memory runtime configuration and metrics
 runtime_config = {
     "chat_rate_limit": settings.chat_rate_limit,
     "speech_rate_limit": settings.speech_rate_limit,
@@ -41,6 +45,32 @@ metrics = {
     "request_count": Counter(),
     "response_times": {}
 }
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await database.connect()
+    # Create the tasks table
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            result TEXT,
+            created_at REAL NOT NULL,
+            completed_at REAL
+        )
+    """)
+    # Create the users table
+    await database.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password TEXT NOT NULL,
+            is_admin BOOLEAN NOT NULL DEFAULT 0
+        )
+    """)
+    # Seed initial data
+    await seed_initial_data()
+    yield
+    await database.disconnect()
 
 app = FastAPI(
     title="Dhwani API",
@@ -58,29 +88,12 @@ app = FastAPI(
         {"name": "Authentication", "description": "User authentication and registration"},
         {"name": "Utility", "description": "General utility endpoints"},
     ],
+    lifespan=lifespan
 )
-
-@app.on_event("startup")
-async def startup():
-    await database.connect()
-    # Create tasks table if it doesn't exist
-    await database.execute("""
-        CREATE TABLE IF NOT EXISTS tasks (
-            task_id TEXT PRIMARY KEY,
-            status TEXT NOT NULL,
-            result TEXT,
-            created_at REAL NOT NULL,
-            completed_at REAL
-        )
-    """)
-
-@app.on_event("shutdown")
-async def shutdown():
-    await database.disconnect()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with specific domains in production
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -90,9 +103,10 @@ app.add_middleware(
 async def add_security_headers(request: Request, call_next):
     start_time = time()
     response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Content-Security-Policy"] = "default-src 'self'"
+    #response.headers["X-Content-Type-Options"] = "nosniff"
+    # TODO - check this for security
+    #response.headers["X-Frame-Options"] = "DENY"
+    #response.headers["Content-Security-Policy"] = "default-src 'self'"
     
     endpoint = request.url.path
     duration = time() - start_time
@@ -114,7 +128,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 limiter = Limiter(key_func=lambda request: get_remote_address(request))
 
-# Request/Response Models
 class SpeechRequest(BaseModel):
     input: str = Field(..., description="Text to convert to speech (max 1000 characters)")
     voice: str = Field(..., description="Voice identifier for the TTS service")
@@ -137,7 +150,7 @@ class SpeechRequest(BaseModel):
         return v
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "input": "Hello, how are you?",
                 "voice": "female-1",
@@ -151,26 +164,26 @@ class TranscriptionResponse(BaseModel):
     text: str = Field(..., description="Transcribed text from the audio")
 
     class Config:
-        schema_extra = {"example": {"text": "Hello, how are you?"}} 
+        json_schema_extra = {"example": {"text": "Hello, how are you?"}} 
 
 class TextGenerationResponse(BaseModel):
     text: str = Field(..., description="Generated text response")
 
     class Config:
-        schema_extra = {"example": {"text": "Hi there, I'm doing great!"}} 
+        json_schema_extra = {"example": {"text": "Hi there, I'm doing great!"}} 
 
 class AudioProcessingResponse(BaseModel):
     result: str = Field(..., description="Processed audio result")
 
     class Config:
-        schema_extra = {"example": {"result": "Processed audio output"}} 
+        json_schema_extra = {"example": {"result": "Processed audio output"}} 
 
 class BulkRegisterResponse(BaseModel):
     successful: List[str] = Field(..., description="List of successfully registered usernames")
     failed: List[dict] = Field(..., description="List of failed registrations with reasons")
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "successful": ["user1", "user2"],
                 "failed": [{"username": "user3", "reason": "Username already exists"}]
@@ -323,7 +336,7 @@ async def process_bulk_users(csv_content: str, current_user: str, task_id: str):
             {
                 "task_id": task_id,
                 "status": "completed",
-                "result": str(result),  # Store as string (JSON-like)
+                "result": str(result),
                 "completed_at": time()
             }
         )
@@ -355,9 +368,9 @@ async def process_bulk_users(csv_content: str, current_user: str, task_id: str):
 @limiter.limit("10/minute")
 async def register_bulk(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="CSV file with 'username' and 'password' columns"),
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-    background_tasks: BackgroundTasks
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
 ):
     current_user = await get_current_user_with_admin(credentials)
     
@@ -398,7 +411,7 @@ async def get_task_status(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    result = eval(task["result"]) if task["result"] and task["status"] == "completed" else task["result"]  # Convert string to dict if completed
+    result = eval(task["result"]) if task["result"] and task["status"] == "completed" else task["result"]
     return TaskStatusResponse(
         task_id=task["task_id"],
         status=task["status"],
@@ -597,7 +610,7 @@ class ChatRequest(BaseModel):
         return v.strip()
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "prompt": "Hello, how are you?",
                 "src_lang": "kan_Knda"
@@ -608,7 +621,7 @@ class ChatResponse(BaseModel):
     response: str = Field(..., description="Generated chat response")
 
     class Config:
-        schema_extra = {"example": {"response": "Hi there, I'm doing great!"}} 
+        json_schema_extra = {"example": {"response": "Hi there, I'm doing great!"}} 
 
 chat_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 
@@ -850,7 +863,7 @@ class TranslationRequest(BaseModel):
         return [bleach.clean(sentence) for sentence in v]
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "sentences": ["Hello", "How are you?"],
                 "src_lang": "en",
@@ -862,7 +875,7 @@ class TranslationResponse(BaseModel):
     translations: List[str] = Field(..., description="Translated sentences")
 
     class Config:
-        schema_extra = {"example": {"translations": ["ನಮಸ್ಕಾರ", "ನೀವು ಹೇಗಿದ್ದೀರಿ?"]}} 
+        json_schema_extra = {"example": {"translations": ["ನಮಸ್ಕಾರ", "ನೀವು ಹೇಗಿದ್ದೀರಿ?"]}} 
 
 translate_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 

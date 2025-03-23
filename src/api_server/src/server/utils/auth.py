@@ -1,8 +1,9 @@
+# src/server/utils/auth.py
 import jwt
 import csv
 from io import StringIO
 from datetime import datetime, timedelta
-from functools import lru_cache  # Added for in-memory caching
+from functools import lru_cache
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -11,8 +12,9 @@ from config.logging_config import logger
 from passlib.context import CryptContext
 from cryptography.fernet import Fernet, InvalidToken
 from databases import Database
-
-from ..main import database  # Replace with actual filename
+from src.server.db import database
+from typing import List, Optional, Dict
+import asyncio
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -83,7 +85,7 @@ class RegisterRequest(BaseModel):
     username: str
     password: str
 
-@lru_cache(maxsize=1000)  # Cache token creation for 1000 unique user IDs
+@lru_cache(maxsize=1000)
 def cached_create_access_token(user_id: str) -> dict:
     expire = datetime.utcnow() + timedelta(minutes=settings.token_expiration_minutes)
     payload = {"sub": user_id, "exp": expire.timestamp(), "type": "access"}
@@ -98,22 +100,18 @@ async def create_access_token(user_id: str) -> dict:
     logger.info(f"Generated tokens for user: {user_id}")
     return tokens
 
-@lru_cache(maxsize=1000)  # Cache user validation for 1000 unique tokens
-def cached_get_user(token: str) -> Optional[str]:
+@lru_cache(maxsize=1000)
+async def cached_get_user(token: str) -> Optional[str]:
     try:
         payload = jwt.decode(token, settings.api_key_secret, algorithms=["HS256"], options={"verify_exp": False})
         token_data = TokenPayload(**payload)
         user_id = token_data.sub
         
-        async def fetch_user():
-            user = await database.fetch_one(
-                "SELECT username FROM users WHERE username = :username",
-                {"username": user_id}
-            )
-            return user_id if user else None
-        
-        user_id = asyncio.run(fetch_user())  # Note: This is a simplification; ideally, make async fully compatible
-        if user_id is None:
+        user = await database.fetch_one(
+            "SELECT username FROM users WHERE username = :username",
+            {"username": user_id}
+        )
+        if not user:
             return None
         
         current_time = datetime.utcnow().timestamp()
@@ -131,7 +129,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
         headers={"WWW-Authenticate": "Bearer"},
     )
     
-    cached_user = cached_get_user(token)
+    cached_user = await cached_get_user(token)
     if cached_user:
         logger.info(f"Cache hit for user validation: {cached_user}")
         return cached_user
@@ -158,14 +156,13 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
-        cached_get_user(token)  # Update cache
         logger.info(f"Validated token for user: {user_id}")
         return user_id
     except jwt.InvalidSignatureError as e:
         logger.error(f"Invalid signature error: {str(e)}")
         raise credentials_exception
     except jwt.InvalidTokenError as e:
-        logger.error tranh khôf"Other token error: {str(e)}")
+        logger.error(f"Other token error: {str(e)}")
         raise credentials_exception
     except Exception as e:
         logger.error(f"Unexpected token validation error: {str(e)}")
@@ -258,7 +255,7 @@ async def register_bulk_users(csv_content: str, current_user: str) -> dict:
             except Exception as e:
                 result["failed"].append({"username": username, "reason": str(e)})
     
-    return result  # Logging moved to background task in main app
+    return result
 
 async def refresh_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> TokenResponse:
     token = credentials.credentials
