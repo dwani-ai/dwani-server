@@ -1,20 +1,12 @@
 import torch
 from logging_config import logger
-from transformers import AutoProcessor, Gemma3ForConditionalGeneration, BitsAndBytesConfig
+from transformers import AutoProcessor, Gemma3ForConditionalGeneration
 from PIL import Image
 from fastapi import HTTPException
 
 # Device setup
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TORCH_DTYPE = torch.bfloat16 if DEVICE != "cpu" else torch.float32
-
-# 4-bit quantization config
-quantization_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_use_double_quant=True,
-    bnb_4bit_compute_dtype=torch.bfloat16
-)
 
 class LLMManager:
     def __init__(self, model_name: str, device: str = DEVICE):
@@ -40,40 +32,41 @@ class LLMManager:
     def load(self):
         if not self.is_loaded:
             try:
+                # Enable TF32 for better performance on supported GPUs
+                if self.device.type == "cuda":
+                    torch.set_float32_matmul_precision('high')
+                    logger.info("Enabled TF32 matrix multiplication for improved performance")
+
+                # Load model without quantization
                 self.model = Gemma3ForConditionalGeneration.from_pretrained(
                     self.model_name,
                     device_map="auto",
-                    quantization_config=quantization_config,
-                    torch_dtype=self.torch_dtype
+                    torch_dtype=self.torch_dtype,
+                    max_memory={0: "10GiB"}  # Adjust based on your GPU capacity
                 ).eval()
 
-                # Move model to device first, then compile
+                # Move model to device
                 self.model.to(self.device)
 
-                # Warmup to ensure graph capture
-                if self.device.type == "cuda":
-                    with torch.cuda.stream(torch.cuda.Stream()):
-                        dummy_input = torch.ones(1, 10, dtype=torch.long).to(self.device)
-                        attention_mask = torch.ones(1, 10, dtype=torch.long).to(self.device)
-                        self.model.generate(input_ids=dummy_input, attention_mask=attention_mask, max_new_tokens=10)
-
-                # Compile after warmup
-                self.model.forward = torch.compile(self.model.forward, mode="reduce-overhead", fullgraph=True)
-
-                self.processor = AutoProcessor.from_pretrained(self.model_name)
+                # Load processor with use_fast=True for faster tokenization
+                self.processor = AutoProcessor.from_pretrained(self.model_name, use_fast=True)
                 self.is_loaded = True
-                logger.info(f"LLM {self.model_name} loaded on {self.device} with 4-bit quantization and compiled forward")
+                logger.info(f"LLM {self.model_name} loaded on {self.device} with fast processor")
             except Exception as e:
                 logger.error(f"Failed to load model: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Model loading failed: {str(e)}")
 
-    async def generate(self, prompt: str, max_tokens: int = 512) -> str:
+    async def generate(self, prompt: str, max_tokens: int = 50) -> str:
         if not self.is_loaded:
             self.load()
 
         cache_key = f"system_prompt_{prompt}"
-        if cache_key in self.token_cache:
-            inputs_vlm = self.token_cache[cache_key]
+        if cache_key in self.token_cache and "response" in self.token_cache[cache_key]:
+            logger.info("Using cached response")
+            return self.token_cache[cache_key]["response"]
+
+        if cache_key in self.token_cache and "inputs" in self.token_cache[cache_key]:
+            inputs_vlm = self.token_cache[cache_key]["inputs"]
             logger.info("Using cached tokenized input")
         else:
             messages_vlm = [
@@ -94,23 +87,26 @@ class LLMManager:
                     return_dict=True,
                     return_tensors="pt"
                 ).to(self.device, dtype=torch.bfloat16)
-                self.token_cache[cache_key] = inputs_vlm
+                self.token_cache[cache_key] = {"inputs": inputs_vlm}
             except Exception as e:
                 logger.error(f"Error in tokenization: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Tokenization failed: {str(e)}")
 
         input_len = inputs_vlm["input_ids"].shape[-1]
-        adjusted_max_tokens = min(max_tokens, max(50, input_len * 2))
+        adjusted_max_tokens = min(max_tokens, max(20, input_len * 2))
 
         with torch.inference_mode():
             generation = self.model.generate(
                 **inputs_vlm,
                 max_new_tokens=adjusted_max_tokens,
-                do_sample=False,
+                do_sample=True,
+                top_p=0.9,
+                temperature=0.7
             )
             generation = generation[0][input_len:]
 
         response = self.processor.decode(generation, skip_special_tokens=True)
+        self.token_cache[cache_key]["response"] = response  # Cache the full response
         logger.info(f"Generated response: {response}")
         return response
 
@@ -130,8 +126,12 @@ class LLMManager:
         ]
 
         cache_key = f"vision_{query}_{'image' if image else 'no_image'}"
-        if cache_key in self.token_cache:
-            inputs_vlm = self.token_cache[cache_key]
+        if cache_key in self.token_cache and "response" in self.token_cache[cache_key]:
+            logger.info("Using cached response")
+            return self.token_cache[cache_key]["response"]
+
+        if cache_key in self.token_cache and "inputs" in self.token_cache[cache_key]:
+            inputs_vlm = self.token_cache[cache_key]["inputs"]
             logger.info("Using cached tokenized input")
         else:
             try:
@@ -142,25 +142,28 @@ class LLMManager:
                     return_dict=True,
                     return_tensors="pt"
                 ).to(self.device, dtype=torch.bfloat16)
-                self.token_cache[cache_key] = inputs_vlm
+                self.token_cache[cache_key] = {"inputs": inputs_vlm}
             except Exception as e:
                 logger.error(f"Error in apply_chat_template: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Failed to process input: {str(e)}")
 
         input_len = inputs_vlm["input_ids"].shape[-1]
-        adjusted_max_tokens = min(512, max(50, input_len * 2))
+        adjusted_max_tokens = min(50, max(20, input_len * 2))
 
         with torch.inference_mode():
             generation = self.model.generate(
                 **inputs_vlm,
                 max_new_tokens=adjusted_max_tokens,
-                do_sample=False,
+                do_sample=True,
+                top_p=0.9,
+                temperature=0.7
             )
             generation = generation[0][input_len:]
 
-        decoded = self.processor.decode(generation, skip_special_tokens=True)
-        logger.info(f"Vision query response: {decoded}")
-        return decoded
+        response = self.processor.decode(generation, skip_special_tokens=True)
+        self.token_cache[cache_key]["response"] = response  # Cache the full response
+        logger.info(f"Vision query response: {response}")
+        return response
 
     async def chat_v2(self, image: Image.Image, query: str) -> str:
         if not self.is_loaded:
@@ -178,8 +181,12 @@ class LLMManager:
         ]
 
         cache_key = f"chat_v2_{query}_{'image' if image else 'no_image'}"
-        if cache_key in self.token_cache:
-            inputs_vlm = self.token_cache[cache_key]
+        if cache_key in self.token_cache and "response" in self.token_cache[cache_key]:
+            logger.info("Using cached response")
+            return self.token_cache[cache_key]["response"]
+
+        if cache_key in self.token_cache and "inputs" in self.token_cache[cache_key]:
+            inputs_vlm = self.token_cache[cache_key]["inputs"]
             logger.info("Using cached tokenized input")
         else:
             try:
@@ -190,22 +197,25 @@ class LLMManager:
                     return_dict=True,
                     return_tensors="pt"
                 ).to(self.device, dtype=torch.bfloat16)
-                self.token_cache[cache_key] = inputs_vlm
+                self.token_cache[cache_key] = {"inputs": inputs_vlm}
             except Exception as e:
                 logger.error(f"Error in apply_chat_template: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Failed to process input: {str(e)}")
 
         input_len = inputs_vlm["input_ids"].shape[-1]
-        adjusted_max_tokens = min(512, max(50, input_len * 2))
+        adjusted_max_tokens = min(50, max(20, input_len * 2))
 
         with torch.inference_mode():
             generation = self.model.generate(
                 **inputs_vlm,
                 max_new_tokens=adjusted_max_tokens,
-                do_sample=False,
+                do_sample=True,
+                top_p=0.9,
+                temperature=0.7
             )
             generation = generation[0][input_len:]
 
-        decoded = self.processor.decode(generation, skip_special_tokens=True)
-        logger.info(f"Chat_v2 response: {decoded}")
-        return decoded
+        response = self.processor.decode(generation, skip_special_tokens=True)
+        self.token_cache[cache_key]["response"] = response  # Cache the full response
+        logger.info(f"Chat_v2 response: {response}")
+        return response
