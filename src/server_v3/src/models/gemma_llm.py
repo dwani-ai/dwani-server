@@ -1,6 +1,6 @@
 import torch
 from logging_config import logger
-from transformers import AutoProcessor, Gemma3ForConditionalGeneration
+from transformers import AutoProcessor, Gemma3ForConditionalGeneration, BitsAndBytesConfig
 from PIL import Image
 from fastapi import HTTPException
 
@@ -37,21 +37,30 @@ class LLMManager:
                     torch.set_float32_matmul_precision('high')
                     logger.info("Enabled TF32 matrix multiplication for improved performance")
 
-                # Load model without quantization
+                # Configure 4-bit quantization
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",  # NF4 (Normal Float 4) is optimized for LLMs
+                    bnb_4bit_compute_dtype=self.torch_dtype,  # Use bfloat16 for computations
+                    bnb_4bit_use_double_quant=True  # Nested quantization for better accuracy
+                )
+
+                # Load model with 4-bit quantization
                 self.model = Gemma3ForConditionalGeneration.from_pretrained(
                     self.model_name,
                     device_map="auto",
+                    quantization_config=quantization_config,
                     torch_dtype=self.torch_dtype,
                     max_memory={0: "10GiB"}  # Adjust based on your GPU capacity
                 ).eval()
 
-                # Move model to device
+                # Move model to device (handled by device_map, but explicit for clarity)
                 self.model.to(self.device)
 
                 # Load processor with use_fast=True for faster tokenization
                 self.processor = AutoProcessor.from_pretrained(self.model_name, use_fast=True)
                 self.is_loaded = True
-                logger.info(f"LLM {self.model_name} loaded on {self.device} with fast processor")
+                logger.info(f"LLM {self.model_name} loaded on {self.device} with 4-bit quantization and fast processor")
             except Exception as e:
                 logger.error(f"Failed to load model: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Model loading failed: {str(e)}")
