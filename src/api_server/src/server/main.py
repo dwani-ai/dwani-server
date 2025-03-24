@@ -221,8 +221,8 @@ class ExternalTTSService(TTSService):
                     if response.status >= 400:
                         raise HTTPException(status_code=response.status, detail=await response.text())
                     return response
-            except aiohttp.ClientTimeout:
-                raise HTTPException(status_code=504, detail="External TTS API timeout")
+            #except aiohttp.ClientTimeoutError:  # Fixed from aiohttp.ClientTimeout
+            #    raise HTTPException(status_code=504, detail="External TTS API timeout")
             except aiohttp.ClientError as e:
                 raise HTTPException(status_code=500, detail=f"External TTS API error: {str(e)}")
 
@@ -681,9 +681,9 @@ async def chat(
                 cached_chat_response(chat_request.prompt, chat_request.src_lang)
                 logger.info(f"Generated Chat response from external API: {response_text}")
                 return ChatResponse(response=response_text)
-        except aiohttp.ClientTimeout:
-            logger.error("External chat API request timed out")
-            raise HTTPException(status_code=504, detail="Chat service timeout")
+        #except aiohttp.ClientTimeoutError:  # Fixed from aiohttp.ClientTimeout
+        #    logger.error("External chat API request timed out")
+        #    raise HTTPException(status_code=504, detail="Chat service timeout")
         except aiohttp.ClientError as e:
             logger.error(f"Error calling external chat API: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
@@ -744,8 +744,8 @@ async def process_audio(
                 processed_result = (await response.json()).get("result", "")
                 logger.info(f"Audio processing completed in {time() - start_time:.2f} seconds")
                 return AudioProcessingResponse(result=processed_result)
-        except aiohttp.ClientTimeout:
-            raise HTTPException(status_code=504, detail="Audio processing service timeout")
+        #except aiohttp.ClientTimeoutError:  # Fixed from aiohttp.ClientTimeout
+        #    raise HTTPException(status_code=504, detail="Audio processing service timeout")
         except aiohttp.ClientError as e:
             logger.error(f"Audio processing request failed: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Audio processing failed: {str(e)}")
@@ -795,8 +795,8 @@ async def transcribe_audio(
                     raise HTTPException(status_code=response.status, detail=await response.text())
                 transcription = (await response.json()).get("text", "")
                 return TranscriptionResponse(text=transcription)
-        except aiohttp.ClientTimeout:
-            raise HTTPException(status_code=504, detail="Transcription service timeout")
+        #except aiohttp.ClientTimeoutError:  # Fixed from aiohttp.ClientTimeout
+        #    raise HTTPException(status_code=504, detail="Transcription service timeout")
         except aiohttp.ClientError as e:
             raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
@@ -921,9 +921,9 @@ async def translate(
                 
                 logger.info(f"Translation successful: {translations}")
                 return TranslationResponse(translations=translations)
-        except aiohttp.TimeoutError:
-            logger.error("Translation request timed out")
-            raise HTTPException(status_code=504, detail="Translation service timeout")
+        #except aiohttp.ClientTimeoutError:  # Fixed from aiohttp.ClientTimeout
+        #    logger.error("Translation request timed out")
+        #    raise HTTPException(status_code=504, detail="Translation service timeout")
         except aiohttp.ClientError as e:
             logger.error(f"Error during translation: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
@@ -1014,9 +1014,9 @@ async def visual_query(
                 
                 logger.info(f"Visual query successful: {answer}")
                 return VisualQueryResponse(answer=answer)
-        except aiohttp.ClientTimeout:
-            logger.error("Visual query request timed out")
-            raise HTTPException(status_code=504, detail="Visual query service timeout")
+        #except aiohttp.ClientTimeoutError:  # Fixed from aiohttp.ClientTimeout
+        #    logger.error("Visual query request timed out")
+        #    raise HTTPException(status_code=504, detail="Visual query service timeout")
         except aiohttp.ClientError as e:
             logger.error(f"Error during visual query: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Visual query failed: {str(e)}")
