@@ -3,7 +3,9 @@ import jwt
 import csv
 from io import StringIO
 from datetime import datetime, timedelta
-from functools import lru_cache
+from collections import OrderedDict
+from typing import List, Optional, Dict, Tuple
+import asyncio
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -13,11 +15,11 @@ from passlib.context import CryptContext
 from cryptography.fernet import Fernet, InvalidToken
 from databases import Database
 from src.server.db import database
-from typing import List, Optional, Dict
-import asyncio
 
+# Password hashing context
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# Settings configuration
 class Settings(BaseSettings):
     api_key_secret: str = Field(..., env="API_KEY_SECRET")
     token_expiration_minutes: int = Field(1440, env="TOKEN_EXPIRATION_MINUTES")
@@ -43,6 +45,7 @@ class Settings(BaseSettings):
 settings = Settings()
 fernet = Fernet(settings.encryption_key.encode())
 
+# Seed initial data (unchanged)
 async def seed_initial_data():
     test_user = await database.fetch_one("SELECT username FROM users WHERE username = :username", {"username": "testuser"})
     if not test_user:
@@ -65,8 +68,10 @@ async def seed_initial_data():
         )
     logger.info(f"Seeded initial data: admin user '{admin_username}'")
 
+# Security scheme
 bearer_scheme = HTTPBearer()
 
+# Pydantic models
 class TokenPayload(BaseModel):
     sub: str
     exp: float
@@ -85,6 +90,9 @@ class RegisterRequest(BaseModel):
     username: str
     password: str
 
+# Token creation with caching (corrected to remain synchronous)
+from functools import lru_cache
+
 @lru_cache(maxsize=1000)
 def cached_create_access_token(user_id: str) -> dict:
     expire = datetime.utcnow() + timedelta(minutes=settings.token_expiration_minutes)
@@ -100,34 +108,50 @@ async def create_access_token(user_id: str) -> dict:
     logger.info(f"Generated tokens for user: {user_id}")
     return tokens
 
+# User validation with async caching
+_user_cache: OrderedDict[str, Tuple[Optional[str], float]] = OrderedDict()
+_cache_lock = asyncio.Lock()
+MAX_CACHE_SIZE = 1000
+
 async def _get_user(token: str) -> Optional[str]:
     try:
-        payload = jwt.decode(token, settings.api_key_secret, algorithms=["HS256"], options={"verify_exp": False})
+        payload = jwt.decode(token, settings.api_key_secret, algorithms=["HS256"])
         token_data = TokenPayload(**payload)
         user_id = token_data.sub
         
         user = await database.fetch_one(
-            "SELECT username FROM users WHERE username = :username",
+            "SELECT 1 FROM users WHERE username = :username",
             {"username": user_id}
         )
-        if not user:
-            return None
-        
-        current_time = datetime.utcnow().timestamp()
-        if current_time > token_data.exp:
-            return None
-        return user_id
-    except (jwt.InvalidSignatureError, jwt.InvalidTokenError):
+        return user_id if user else None
+    except jwt.ExpiredSignatureError:
+        logger.warning(f"Token expired: {token[:10]}...")
+        return None
+    except (jwt.InvalidSignatureError, jwt.InvalidTokenError) as e:
+        logger.warning(f"Invalid token: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching user: {str(e)}")
         return None
 
-@lru_cache(maxsize=1000)
-def cached_get_user(token: str) -> Optional[str]:
-    # Use asyncio.run to execute the async _get_user and cache the result
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        return loop.run_until_complete(_get_user(token))
-    else:
-        return asyncio.run(_get_user(token))
+async def cached_get_user(token: str) -> Optional[str]:
+    current_time = datetime.utcnow().timestamp()
+    async with _cache_lock:
+        if token in _user_cache:
+            user_id, exp = _user_cache.pop(token)
+            if current_time <= exp:
+                _user_cache[token] = (user_id, exp)
+                logger.info(f"Cache hit for user validation: {user_id}")
+                return user_id
+        if len(_user_cache) >= MAX_CACHE_SIZE:
+            _user_cache.popitem(last=False)
+        user = await _get_user(token)
+        if user:
+            payload = jwt.decode(token, settings.api_key_secret, algorithms=["HS256"])
+            _user_cache[token] = (user, TokenPayload(**payload).exp)
+        else:
+            _user_cache[token] = (None, current_time + 3600)  # Cache invalid tokens for 1 hour
+        return user
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
     token = credentials.credentials
@@ -137,44 +161,11 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
         headers={"WWW-Authenticate": "Bearer"},
     )
     
-    cached_user = cached_get_user(token)  # Now a synchronous call returning the result
-    if cached_user:
-        logger.info(f"Cache hit for user validation: {cached_user}")
-        return cached_user
-    
-    try:
-        payload = jwt.decode(token, settings.api_key_secret, algorithms=["HS256"], options={"verify_exp": False})
-        token_data = TokenPayload(**payload)
-        user_id = token_data.sub
-        
-        user = await database.fetch_one(
-            "SELECT username FROM users WHERE username = :username",
-            {"username": user_id}
-        )
-        if user_id is None or not user:
-            logger.warning(f"Invalid or unknown user: {user_id}")
-            raise credentials_exception
-        
-        current_time = datetime.utcnow().timestamp()
-        if current_time > token_data.exp:
-            logger.warning(f"Token expired: current_time={current_time}, exp={token_data.exp}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token has expired",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        
-        logger.info(f"Validated token for user: {user_id}")
-        return user_id
-    except jwt.InvalidSignatureError as e:
-        logger.error(f"Invalid signature error: {str(e)}")
+    user = await cached_get_user(token)
+    if not user:
         raise credentials_exception
-    except jwt.InvalidTokenError as e:
-        logger.error(f"Other token error: {str(e)}")
-        raise credentials_exception
-    except Exception as e:
-        logger.error(f"Unexpected token validation error: {str(e)}")
-        raise credentials_exception
+    logger.info(f"User validated: {user}")
+    return user
 
 async def get_current_user_with_admin(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
     user_id = await get_current_user(credentials)
@@ -187,6 +178,7 @@ async def get_current_user_with_admin(credentials: HTTPAuthorizationCredentials 
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return user_id
 
+# Login functionality (unchanged)
 async def login(login_request: LoginRequest) -> TokenResponse:
     user = await database.fetch_one(
         "SELECT username, password FROM users WHERE username = :username",
@@ -208,6 +200,7 @@ async def login(login_request: LoginRequest) -> TokenResponse:
     tokens = await create_access_token(user_id=user["username"])
     return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
 
+# Registration functionality (unchanged)
 async def register(register_request: RegisterRequest, current_user: str = Depends(get_current_user_with_admin)) -> TokenResponse:
     existing_user = await database.fetch_one(
         "SELECT username FROM users WHERE username = :username",
@@ -228,6 +221,7 @@ async def register(register_request: RegisterRequest, current_user: str = Depend
     logger.info(f"Registered and generated token for user: {register_request.username} by admin {current_user}")
     return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
 
+# Bulk registration (unchanged)
 async def register_bulk_users(csv_content: str, current_user: str) -> dict:
     result = {"successful": [], "failed": []}
     
@@ -265,6 +259,7 @@ async def register_bulk_users(csv_content: str, current_user: str) -> dict:
     
     return result
 
+# Refresh token (unchanged)
 async def refresh_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> TokenResponse:
     token = credentials.credentials
     try:
