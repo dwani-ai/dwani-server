@@ -209,7 +209,7 @@ class TTSService(ABC):
         pass
 
 class ExternalTTSService(TTSService):
-    @tts_breaker
+    #@tts_breaker
     async def generate_speech(self, payload: dict) -> aiohttp.ClientResponse:
         async with aiohttp.ClientSession() as session:
             try:
@@ -643,7 +643,7 @@ def cached_chat_response(prompt: str, src_lang: str) -> str:
               504: {"description": "Chat service timeout"}
           })
 @limiter.limit(lambda: runtime_config["chat_rate_limit"])
-@chat_breaker
+# Removed @chat_breaker to fix coroutine error
 async def chat(
     request: Request,
     chat_request: ChatRequest,
@@ -708,7 +708,7 @@ audio_proc_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
               504: {"description": "Audio processing timeout"}
           })
 @limiter.limit(settings.chat_rate_limit)
-@audio_proc_breaker
+#@audio_proc_breaker
 async def process_audio(
     request: Request,
     file: UploadFile = File(..., description="Audio file to process"),
@@ -769,7 +769,7 @@ transcribe_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
               503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "Transcription service timeout"}
           })
-@transcribe_breaker
+#@transcribe_breaker
 async def transcribe_audio(
     file: UploadFile = File(..., description="Audio file to transcribe"),
     language: str = Query(..., enum=["kannada", "hindi", "tamil"], description="Language of the audio"),
@@ -891,7 +891,7 @@ translate_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
               503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "Translation service timeout"}
           })
-@translate_breaker
+#@translate_breaker
 async def translate(
     request: TranslationRequest,
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
@@ -967,7 +967,7 @@ visual_query_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
               504: {"description": "Visual query service timeout"}
           })
 @limiter.limit(settings.chat_rate_limit)
-@visual_query_breaker
+#@visual_query_breaker
 async def visual_query(
     request: Request,
     query: str = Form(..., description="Text query for the visual content"),
