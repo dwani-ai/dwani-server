@@ -733,6 +733,8 @@ async def process_audio(
             form_data.add_field('file', file_content, filename=file.filename, content_type=file.content_type)
             
             external_url = f"{settings.external_audio_proc_url}/process_audio/?language={bleach.clean(language)}"
+            #external_url = f"https://slabstech-asr-indic-server-cpu.hf.space/transcribe?language={bleach.clean(language)}"
+
             async with session.post(
                 external_url,
                 data=form_data,
@@ -749,20 +751,11 @@ async def process_audio(
         except aiohttp.ClientError as e:
             logger.error(f"Audio processing request failed: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Audio processing failed: {str(e)}")
-
-transcribe_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
-
 @app.post("/v1/transcribe/", 
           response_model=TranscriptionResponse,
           summary="Transcribe Audio File",
           description="Transcribe an uploaded audio file into text in the specified language. Requires authentication.",
-          tags=["Audio"],
-          responses={
-              200: {"description": "Transcription result", "model": TranscriptionResponse},
-              401: {"description": "Unauthorized - Token required"},
-              503: {"description": "Service unavailable due to repeated failures"},
-              504: {"description": "Transcription service timeout"}
-          })
+          tags=["Audio"])
 async def transcribe_audio(
     file: UploadFile = File(..., description="Audio file to transcribe"),
     language: str = Query(..., enum=["kannada", "hindi", "tamil"], description="Language of the audio"),
@@ -770,36 +763,32 @@ async def transcribe_audio(
 ):
     user_id = await get_current_user(credentials)
     
-    allowed_types = ["audio/mpeg", "audio/wav", "audio/flac"]
+    allowed_types = ["audio/mpeg", "audio/wav", "audio/flac", "audio/x-wav"]
     if file.content_type not in allowed_types:
         raise HTTPException(status_code=400, detail=f"Invalid file type; allowed: {allowed_types}")
     
-    file_content = await file.read()
-    if len(file_content) > 10 * 1024 * 1024:
+    if file.size > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large; max 10MB")
     
-    start_time = time()
+    file_content = await file.read()
+    
     async with aiohttp.ClientSession() as session:
-        try:
-            form_data = aiohttp.FormData()
-            form_data.add_field('file', file_content, filename=file.filename, content_type=file.content_type)
-            
-            external_url = f"{settings.external_asr_url}/transcribe/?language={bleach.clean(language)}"
-            async with session.post(
-                external_url,
-                data=form_data,
-                headers={"accept": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=60)
-            ) as response:
-                if response.status >= 400:
-                    raise HTTPException(status_code=response.status, detail=await response.text())
-                transcription = (await response.json()).get("text", "")
-                return TranscriptionResponse(text=transcription)
-        except asyncio.TimeoutError:  # Fixed from aiohttp.ClientTimeout
-            raise HTTPException(status_code=504, detail="Transcription service timeout")
-        except aiohttp.ClientError as e:
-            raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
-
+        form_data = aiohttp.FormData()
+        form_data.add_field('file', file_content, filename=file.filename, content_type=file.content_type)
+        
+        external_url = f"https://slabstech-asr-indic-server-cpu.hf.space/transcribe/?language={bleach.clean(language)}"
+        async with session.post(
+            external_url,
+            data=form_data,
+            headers={"accept": "application/json"},
+            timeout=aiohttp.ClientTimeout(total=60)
+        ) as response:
+            if response.status >= 400:
+                raise HTTPException(status_code=response.status, detail=await response.text())
+            transcription = (await response.json()).get("text", "")
+            return TranscriptionResponse(text=transcription)
+        
+        
 @app.post("/v1/chat_v2", 
           response_model=TranscriptionResponse,
           summary="Chat with Image (V2)",
