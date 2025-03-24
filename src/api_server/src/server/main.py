@@ -212,6 +212,7 @@ class ExternalTTSService(TTSService):
     async def generate_speech(self, payload: dict) -> aiohttp.ClientResponse:
         async with aiohttp.ClientSession() as session:
             try:
+                print(settings.external_tts_url)
                 async with session.post(
                     settings.external_tts_url,
                     json=payload,
@@ -538,6 +539,8 @@ async def update_config(
     logger.info(f"Runtime config updated by {current_user}: {runtime_config}")
     return {"message": "Configuration updated successfully", "current_config": runtime_config}
 
+
+
 @app.post("/v1/audio/speech",
           summary="Generate Speech from Text",
           description="Convert text to speech in the specified format using an external TTS service. Rate limited to 5 requests per minute per user. Requires authentication.",
@@ -576,7 +579,9 @@ async def generate_audio(
         "speed": speech_request.speed
     }
     
+    # Fetch the full response
     response = await tts_service.generate_speech(payload)
+    audio_content = await response.read()  # Buffer the entire audio content
     
     headers = {
         "Content-Disposition": f"inline; filename=\"speech.{speech_request.response_format.value}\"",
@@ -585,8 +590,7 @@ async def generate_audio(
     }
     
     async def stream_response():
-        async for chunk in response.content.iter_chunked(8192):
-            yield chunk
+        yield audio_content  # Yield the full content in one chunk
     
     return StreamingResponse(
         stream_response(),
