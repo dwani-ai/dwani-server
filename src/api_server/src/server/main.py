@@ -209,7 +209,6 @@ class TTSService(ABC):
         pass
 
 class ExternalTTSService(TTSService):
-    #@tts_breaker
     async def generate_speech(self, payload: dict) -> aiohttp.ClientResponse:
         async with aiohttp.ClientSession() as session:
             try:
@@ -577,10 +576,7 @@ async def generate_audio(
         "speed": speech_request.speed
     }
     
-    try:
-        response = await tts_service.generate_speech(payload)
-    except tts_breaker.BreakerOpen:
-        raise HTTPException(status_code=503, detail="TTS service temporarily unavailable")
+    response = await tts_service.generate_speech(payload)
     
     headers = {
         "Content-Disposition": f"inline; filename=\"speech.{speech_request.response_format.value}\"",
@@ -643,7 +639,6 @@ def cached_chat_response(prompt: str, src_lang: str) -> str:
               504: {"description": "Chat service timeout"}
           })
 @limiter.limit(lambda: runtime_config["chat_rate_limit"])
-# Removed @chat_breaker to fix coroutine error
 async def chat(
     request: Request,
     chat_request: ChatRequest,
@@ -708,7 +703,6 @@ audio_proc_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
               504: {"description": "Audio processing timeout"}
           })
 @limiter.limit(settings.chat_rate_limit)
-#@audio_proc_breaker
 async def process_audio(
     request: Request,
     file: UploadFile = File(..., description="Audio file to process"),
@@ -769,7 +763,6 @@ transcribe_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
               503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "Transcription service timeout"}
           })
-#@transcribe_breaker
 async def transcribe_audio(
     file: UploadFile = File(..., description="Audio file to transcribe"),
     language: str = Query(..., enum=["kannada", "hindi", "tamil"], description="Language of the audio"),
@@ -891,7 +884,6 @@ translate_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
               503: {"description": "Service unavailable due to repeated failures"},
               504: {"description": "Translation service timeout"}
           })
-#@translate_breaker
 async def translate(
     request: TranslationRequest,
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
@@ -929,7 +921,7 @@ async def translate(
                 
                 logger.info(f"Translation successful: {translations}")
                 return TranslationResponse(translations=translations)
-        except aiohttp.ClientTimeout:
+        except aiohttp.TimeoutError:
             logger.error("Translation request timed out")
             raise HTTPException(status_code=504, detail="Translation service timeout")
         except aiohttp.ClientError as e:
@@ -967,7 +959,6 @@ visual_query_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
               504: {"description": "Visual query service timeout"}
           })
 @limiter.limit(settings.chat_rate_limit)
-#@visual_query_breaker
 async def visual_query(
     request: Request,
     query: str = Form(..., description="Text query for the visual content"),

@@ -100,8 +100,7 @@ async def create_access_token(user_id: str) -> dict:
     logger.info(f"Generated tokens for user: {user_id}")
     return tokens
 
-@lru_cache(maxsize=1000)
-async def cached_get_user(token: str) -> Optional[str]:
+async def _get_user(token: str) -> Optional[str]:
     try:
         payload = jwt.decode(token, settings.api_key_secret, algorithms=["HS256"], options={"verify_exp": False})
         token_data = TokenPayload(**payload)
@@ -121,6 +120,15 @@ async def cached_get_user(token: str) -> Optional[str]:
     except (jwt.InvalidSignatureError, jwt.InvalidTokenError):
         return None
 
+@lru_cache(maxsize=1000)
+def cached_get_user(token: str) -> Optional[str]:
+    # Use asyncio.run to execute the async _get_user and cache the result
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        return loop.run_until_complete(_get_user(token))
+    else:
+        return asyncio.run(_get_user(token))
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
     token = credentials.credentials
     credentials_exception = HTTPException(
@@ -129,7 +137,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
         headers={"WWW-Authenticate": "Bearer"},
     )
     
-    cached_user = await cached_get_user(token)
+    cached_user = cached_get_user(token)  # Now a synchronous call returning the result
     if cached_user:
         logger.info(f"Cache hit for user validation: {cached_user}")
         return cached_user
