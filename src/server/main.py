@@ -733,6 +733,69 @@ async def chat_v2(
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
+class TranscriptionResponse(BaseModel):
+    text: str
+
+
+class ASRModelManager:
+    def __init__(self, device_type="cuda"):
+        self.device_type = device_type
+        self.model_language = {
+            "kannada": "kn", "hindi": "hi", "malayalam": "ml", "assamese": "as", "bengali": "bn",
+            "bodo": "brx", "dogri": "doi", "gujarati": "gu", "kashmiri": "ks", "konkani": "kok",
+            "maithili": "mai", "manipuri": "mni", "marathi": "mr", "nepali": "ne", "odia": "or",
+            "punjabi": "pa", "sanskrit": "sa", "santali": "sat", "sindhi": "sd", "tamil": "ta",
+            "telugu": "te", "urdu": "ur"
+        }
+
+
+from fastapi import FastAPI, UploadFile
+import torch
+import torchaudio
+from transformers import AutoModel
+import argparse
+import uvicorn
+from pydantic import BaseModel
+from pydub import AudioSegment
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi.responses import RedirectResponse, JSONResponse
+from typing import List
+
+# Load the model
+model = AutoModel.from_pretrained("ai4bharat/indic-conformer-600m-multilingual", trust_remote_code=True)
+
+asr_manager = ASRModelManager()  # Load Kannada, Hindi, Tamil, Telugu, Malayalam
+
+
+#asr_manager = ASRModelManager(device_type="")
+
+@app.post("/transcribe/", response_model=TranscriptionResponse)
+async def transcribe_audio(file: UploadFile = File(...), language: str = Query(..., enum=list(asr_manager.model_language.keys()))):
+    # Load the uploaded audio file
+    wav, sr = torchaudio.load(file.file)
+    wav = torch.mean(wav, dim=0, keepdim=True)
+
+    # Resample if necessary
+    target_sample_rate = 16000  # Expected sample rate
+    if sr != target_sample_rate:
+        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sample_rate)
+        wav = resampler(wav)
+
+    # Perform ASR with CTC decoding
+    #transcription_ctc = model(wav, "kn", "ctc")
+
+    # Perform ASR with RNNT decoding
+    transcription_rnnt = model(wav, "kn", "rnnt")
+
+    return JSONResponse(content={"text": transcription_rnnt})
+
+
+
+class BatchTranscriptionResponse(BaseModel):
+    transcriptions: List[str]
+
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the FastAPI server.")
     parser.add_argument("--port", type=int, default=settings.port, help="Port to run the server on.")

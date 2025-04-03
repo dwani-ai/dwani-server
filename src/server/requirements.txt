@@ -1,0 +1,36 @@
+transformers @ git+https://github.com/huggingface/transformers@v4.49.0-Gemma-3
+torch
+accelerate
+bitsandbytes
+pillow
+uvicorn
+fastapi
+pydantic_settings
+slowapi
+python-multipart
+IndicTransToolkit @ git+https://github.com/VarunGumma/IndicTransToolkit.git@399b3fec93d2ee85cb998cb7a4fb7a7d83afcbcf
+packaging
+
+sentencepiece
+descript-audio-codec
+descript-audiotools @ git+https://github.com/descriptinc/audiotools
+protobuf>=4.0.0
+fastapi
+uvicorn
+pydantic-settings
+huggingface-hub
+openai
+torch
+parler_tts @ git+https://github.com/slabstech/parler-tts.git
+packaging  # Added to resolve flash-attn dependency
+flash-attn
+
+torchaudio
+onnx
+onnxruntime
+onnxruntime-gpu
+uvicorn
+fastapi
+pydub
+python-multipart
+hf_xet
