@@ -791,24 +791,98 @@ async def transcribe_audio(file: UploadFile = File(...), language: str = Query(.
         resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sample_rate)
         wav = resampler(wav)
 
-    # Perform ASR with CTC decoding
-    #transcription_ctc = model(wav, "kn", "ctc")
-
-    # Perform ASR with RNNT decoding
-    transcription_rnnt = model(wav, "kn", "rnnt")
+    # Perform ASR with RNNT decoding using the provided language
+    transcription_rnnt = model(wav, asr_manager.model_language[language], "rnnt")
 
     return JSONResponse(content={"text": transcription_rnnt})
 
+@app.post("/v1/speech_to_speech")
+async def speech_to_speech(
+    file: UploadFile = File(...),
+    language: str = Query(..., enum=list(asr_manager.model_language.keys())),
+    voice: str = Body(default=config.voice)
+) -> StreamingResponse:
+    # Step 1: Transcribe audio to text
+    transcription = await transcribe_audio(file, language)
+    logger.info(f"Transcribed text: {transcription.text}")
+
+    # Step 2: Process text with chat endpoint
+    chat_request = ChatRequest(
+        prompt=transcription.text,
+        src_lang="kn_Knda",  # Assuming script for Indian languages
+        tgt_lang="kn_Knda"
+    )
+    processed_text = await chat(Request(), chat_request)
+    logger.info(f"Processed text: {processed_text.response}")
+
+    # Step 3: Convert processed text to speech
+    audio_response = await generate_audio(
+        input=processed_text.response,
+        voice=voice,
+        model=tts_config.model,
+        response_format=config.response_format,
+        speed=SPEED
+    )
+    return audio_response
 
 
 class BatchTranscriptionResponse(BaseModel):
     transcriptions: List[str]
 
-
+import json
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the FastAPI server.")
     parser.add_argument("--port", type=int, default=settings.port, help="Port to run the server on.")
     parser.add_argument("--host", type=str, default=settings.host, help="Host to run the server on.")
+    parser.add_argument("--config", type=str, default="config_one", help="Configuration to use (e.g., config_one, config_two, config_three, config_four)")
     args = parser.parse_args()
-    uvicorn.run(app, host=args.host, port=args.port)
+
+    # Load the JSON configuration file
+    def load_config(config_path="dhwani_config.json"):
+        with open(config_path, "r") as f:
+            return json.load(f)
+
+    config_data = load_config()
+    if args.config not in config_data["configs"]:
+        raise ValueError(f"Invalid config: {args.config}. Available: {list(config_data['configs'].keys())}")
+    
+    selected_config = config_data["configs"][args.config]
+    global_settings = config_data["global_settings"]
+
+    # Update settings based on selected config
+    settings.llm_model_name = selected_config["components"]["LLM"]["model"]
+    settings.max_tokens = selected_config["components"]["LLM"]["max_tokens"]
+    settings.host = global_settings["host"]
+    settings.port = global_settings["port"]
+    settings.chat_rate_limit = global_settings["chat_rate_limit"]
+    settings.speech_rate_limit = global_settings["speech_rate_limit"]
+
+    # Initialize LLMManager with the selected LLM model
+    llm_manager = LLMManager(settings.llm_model_name)
+
+    # Initialize ASR model if present in config
+    if selected_config["components"]["ASR"]:
+        asr_model_name = selected_config["components"]["ASR"]["model"]
+        model = AutoModel.from_pretrained(asr_model_name, trust_remote_code=True)
+        asr_manager.model_language[selected_config["language"]] = selected_config["components"]["ASR"]["language_code"]
+
+    # Initialize TTS model if present in config
+    if selected_config["components"]["TTS"]:
+        tts_model_name = selected_config["components"]["TTS"]["model"]
+        tts_config.model = tts_model_name  # Update tts_config to use the selected model
+        tts_model_manager.get_or_load_model(tts_model_name)
+
+    # Initialize Translation models - load all specified models
+    if selected_config["components"]["Translation"]:
+        for translation_config in selected_config["components"]["Translation"]:
+            src_lang = translation_config["src_lang"]
+            tgt_lang = translation_config["tgt_lang"]
+            model_manager.get_model(src_lang, tgt_lang)
+
+    # Override host and port from command line arguments if provided
+    host = args.host if args.host != settings.host else settings.host
+    port = args.port if args.port != settings.port else settings.port
+
+    # Run the server
+    uvicorn.run(app, host=host, port=port)
