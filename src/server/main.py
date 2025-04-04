@@ -330,7 +330,9 @@ SUPPORTED_LANGUAGES = {
     "brx_Deva", "mai_Deva", "sat_Olck", "doi_Deva", "mal_Mlym", "snd_Arab",
     "eng_Latn", "mar_Deva", "snd_Deva", "gom_Deva", "mni_Beng", "tam_Taml",
     "guj_Gujr", "mni_Mtei", "tel_Telu", "hin_Deva", "npi_Deva", "urd_Arab",
-    "kan_Knda", "ory_Orya"
+    "kan_Knda", "ory_Orya",
+    "deu_Latn", "fra_Latn", "nld_Latn", "spa_Latn", "ita_Latn",
+    "por_Latn", "rus_Cyrl", "pol_Latn"
 }
 
 class Settings(BaseSettings):
@@ -564,9 +566,14 @@ async def chat(request: Request, chat_request: ChatRequest):
     if not chat_request.prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
     logger.info(f"Received prompt: {chat_request.prompt}, src_lang: {chat_request.src_lang}, tgt_lang: {chat_request.tgt_lang}")
+    
+    # Define European languages that gemma-3-4b-it can handle natively
+    EUROPEAN_LANGUAGES = {"deu_Latn", "fra_Latn", "nld_Latn", "spa_Latn", "ita_Latn", "por_Latn", "rus_Cyrl", "pol_Latn"}
+    
     try:
-        # Translate prompt to English if src_lang is not English
-        if chat_request.src_lang != "eng_Latn":
+        # Check if the source language is Indian (requires translation) or European/English (direct processing)
+        if chat_request.src_lang != "eng_Latn" and chat_request.src_lang not in EUROPEAN_LANGUAGES:
+            # Translate Indian language prompt to English
             translated_prompt = await perform_internal_translation(
                 sentences=[chat_request.prompt],
                 src_lang=chat_request.src_lang,
@@ -575,15 +582,17 @@ async def chat(request: Request, chat_request: ChatRequest):
             prompt_to_process = translated_prompt[0]
             logger.info(f"Translated prompt to English: {prompt_to_process}")
         else:
+            # Use prompt directly for English and European languages
             prompt_to_process = chat_request.prompt
-            logger.info("Prompt already in English, no translation needed")
+            logger.info("Prompt in English or European language, no translation needed")
 
-        # Generate response in English
+        # Generate response with the LLM (assumed to handle multilingual input natively)
         response = await llm_manager.generate(prompt_to_process, settings.max_tokens)
-        logger.info(f"Generated English response: {response}")
+        logger.info(f"Generated response: {response}")
 
-        # Translate response to target language if tgt_lang is not English
-        if chat_request.tgt_lang != "eng_Latn":
+        # Check if the target language is Indian (requires translation) or European/English (direct output)
+        if chat_request.tgt_lang != "eng_Latn" and chat_request.tgt_lang not in EUROPEAN_LANGUAGES:
+            # Translate response to Indian target language
             translated_response = await perform_internal_translation(
                 sentences=[response],
                 src_lang="eng_Latn",
@@ -592,8 +601,9 @@ async def chat(request: Request, chat_request: ChatRequest):
             final_response = translated_response[0]
             logger.info(f"Translated response to {chat_request.tgt_lang}: {final_response}")
         else:
+            # Keep response as-is for English and European languages
             final_response = response
-            logger.info("Response kept in English, no translation needed")
+            logger.info(f"Response in {chat_request.tgt_lang}, no translation needed")
 
         return ChatResponse(response=final_response)
     except Exception as e:
