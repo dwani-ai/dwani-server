@@ -44,3 +44,13 @@ curl -X 'POST' \
   "response_format": "mp3",
   "speed": 1
 }' -o test.mp3
+
+-
+Speech to speech
+
+curl -X 'POST' \
+  'https://slabstech-dhwani-internal-api-server.hf.space/v1/speech_to_speech?language=kannada' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: multipart/form-data' \
+  -F 'file=@kannada_sample_1.wav;type=audio/x-wav' \
+  -F 'voice=Anu speaks with a high pitch at a normal pace in a clear, close-sounding environment. Her neutral tone is captured with excellent audio quality'  -o speech-output.mp3
