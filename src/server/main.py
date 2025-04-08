@@ -30,7 +30,6 @@ import zipfile
 import soundfile as sf
 import torch
 from fastapi import Body, FastAPI, HTTPException, Response
-from parler_tts import ParlerTTSForConditionalGeneration
 from transformers import AutoTokenizer, AutoFeatureExtractor, set_seed
 import numpy as np
 from config import SPEED, ResponseFormat, config
@@ -64,98 +63,12 @@ if torch.cuda.is_available():
 else:
     print("CUDA is not available on this system.")
 
-class TTSModelManager:
-    def __init__(self):
-        self.model_tokenizer: OrderedDict[
-            str, tuple[ParlerTTSForConditionalGeneration, AutoTokenizer, AutoTokenizer]
-        ] = OrderedDict()
-        self.max_length = 50
-
-    def load_model(
-        self, model_name: str
-    ) -> tuple[ParlerTTSForConditionalGeneration, AutoTokenizer, AutoTokenizer]:
-        logger.debug(f"Loading {model_name}...")
-        start = time.perf_counter()
-        
-        model_name = "ai4bharat/indic-parler-tts"
-        attn_implementation = "flash_attention_2"
-        
-        model = ParlerTTSForConditionalGeneration.from_pretrained(
-            model_name,
-            attn_implementation=attn_implementation
-        ).to(device, dtype=torch_dtype)
-
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        description_tokenizer = AutoTokenizer.from_pretrained(model.config.text_encoder._name_or_path)
-
-        # Set pad tokens
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        if description_tokenizer.pad_token is None:
-            description_tokenizer.pad_token = description_tokenizer.eos_token
-
-        # TODO - temporary disable -torch.compile 
-        '''
-        # Update model configuration
-        model.config.pad_token_id = tokenizer.pad_token_id
-        # Update for deprecation: use max_batch_size instead of batch_size
-        if hasattr(model.generation_config.cache_config, 'max_batch_size'):
-            model.generation_config.cache_config.max_batch_size = 1
-        model.generation_config.cache_implementation = "static"
-        '''
-        # Compile the model
-        compile_mode = "default"
-        #compile_mode = "reduce-overhead"
-        
-        model.forward = torch.compile(model.forward, mode=compile_mode)
-
-        # Warmup
-        warmup_inputs = tokenizer("Warmup text for compilation", 
-                                return_tensors="pt", 
-                                padding="max_length", 
-                                max_length=self.max_length).to(device)
-        
-        model_kwargs = {
-            "input_ids": warmup_inputs["input_ids"],
-            "attention_mask": warmup_inputs["attention_mask"],
-            "prompt_input_ids": warmup_inputs["input_ids"],
-            "prompt_attention_mask": warmup_inputs["attention_mask"],
-        }
-        
-        n_steps = 1 if compile_mode == "default" else 2
-        for _ in range(n_steps):
-            _ = model.generate(**model_kwargs)
-        
-        logger.info(
-            f"Loaded {model_name} with Flash Attention and compilation in {time.perf_counter() - start:.2f} seconds"
-        )
-        return model, tokenizer, description_tokenizer
-
-    def get_or_load_model(
-        self, model_name: str
-    ) -> tuple[ParlerTTSForConditionalGeneration, AutoTokenizer, AutoTokenizer]:
-        if model_name not in self.model_tokenizer:
-            logger.info(f"Model {model_name} isn't already loaded")
-            if len(self.model_tokenizer) == config.max_models:
-                logger.info("Unloading the oldest loaded model")
-                del self.model_tokenizer[next(iter(self.model_tokenizer))]
-            self.model_tokenizer[model_name] = self.load_model(model_name)
-        return self.model_tokenizer[model_name]
-
-tts_model_manager = TTSModelManager()
-
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    if not config.lazy_load_model:
-        tts_model_manager.get_or_load_model(config.model)
-    yield
-
 app = FastAPI(
     title="Dhwani API",
     description="AI Chat API supporting Indian languages",
     version="1.0.0",
     redirect_slashes=False,
-    lifespan=lifespan
+    #lifespan=lifespan
 )
 
 def chunk_text(text, chunk_size):
@@ -165,158 +78,117 @@ def chunk_text(text, chunk_size):
         chunks.append(' '.join(words[i:i + chunk_size]))
     return chunks
 
-@app.post("/v1/audio/speech")
-async def generate_audio(
-    input: Annotated[str, Body()] = config.input,
-    voice: Annotated[str, Body()] = config.voice,
-    model: Annotated[str, Body()] = config.model,
-    response_format: Annotated[ResponseFormat, Body(include_in_schema=False)] = config.response_format,
-    speed: Annotated[float, Body(include_in_schema=False)] = SPEED,
-) -> StreamingResponse:
-    tts, tokenizer, description_tokenizer = tts_model_manager.get_or_load_model(model)
-    if speed != SPEED:
-        logger.warning(
-            "Specifying speed isn't supported by this model. Audio will be generated with the default speed"
-        )
-    start = time.perf_counter()
 
-    chunk_size = 15
-    all_chunks = chunk_text(input, chunk_size)
+import io
+import torch
+import requests
+import tempfile
+import numpy as np
+import soundfile as sf
+from fastapi import FastAPI, HTTPException
+from transformers import AutoModel
+from pydantic import BaseModel
+from typing import Optional
+from starlette.responses import StreamingResponse
 
-    if len(all_chunks) <= chunk_size:
-        desc_inputs = description_tokenizer(voice,
-                                          return_tensors="pt",
-                                          padding="max_length",
-                                          max_length=tts_model_manager.max_length).to(device)
-        prompt_inputs = tokenizer(input,
-                                return_tensors="pt",
-                                padding="max_length",
-                                max_length=tts_model_manager.max_length).to(device)
-        
-        input_ids = desc_inputs["input_ids"]
-        attention_mask = desc_inputs["attention_mask"]
-        prompt_input_ids = prompt_inputs["input_ids"]
-        prompt_attention_mask = prompt_inputs["attention_mask"]
 
-        generation = tts.generate(
-            input_ids=input_ids,
-            prompt_input_ids=prompt_input_ids,
-            attention_mask=attention_mask,
-            prompt_attention_mask=prompt_attention_mask
-        ).to(torch.float32)
+tts_repo_id = "ai4bharat/IndicF5"
+tts_model = AutoModel.from_pretrained(tts_repo_id, trust_remote_code=True)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Device:", device)
+tts_model = tts_model.to(device)
 
-        audio_arr = generation.cpu().float().numpy().squeeze()
-    else:
-        all_descriptions = [voice] * len(all_chunks)
-        description_inputs = description_tokenizer(all_descriptions,
-                                                 return_tensors="pt",
-                                                 padding=True).to(device)
-        prompts = tokenizer(all_chunks,
-                          return_tensors="pt",
-                          padding=True).to(device)
+EXAMPLES = [
+    {
+        "audio_name": "KAN_F (Happy)",
+        "audio_url": "https://github.com/AI4Bharat/IndicF5/raw/refs/heads/main/prompts/KAN_F_HAPPY_00001.wav",
+        "ref_text": "ನಮ್‌ ಫ್ರಿಜ್ಜಲ್ಲಿ  ಕೂಲಿಂಗ್‌ ಸಮಸ್ಯೆ ಆಗಿ ನಾನ್‌ ಭಾಳ ದಿನದಿಂದ ಒದ್ದಾಡ್ತಿದ್ದೆ, ಆದ್ರೆ ಅದ್ನೀಗ ಮೆಕಾನಿಕ್ ಆಗಿರೋ ನಿಮ್‌ ಸಹಾಯ್ದಿಂದ ಬಗೆಹರಿಸ್ಕೋಬೋದು ಅಂತಾಗಿ ನಿರಾಳ ಆಯ್ತು ನಂಗೆ.",
+        "synth_text": "ಚೆನ್ನೈನ ಶೇರ್ ಆಟೋ ಪ್ರಯಾಣಿಕರ ನಡುವೆ ಆಹಾರವನ್ನು ಹಂಚಿಕೊಂಡು ತಿನ್ನುವುದು ನನಗೆ ಮನಸ್ಸಿಗೆ ತುಂಬಾ ಒಳ್ಳೆಯದೆನಿಸುವ ವಿಷಯ."
+    },
+]
 
-        set_seed(0)
-        generation = tts.generate(
-            input_ids=description_inputs["input_ids"],
-            attention_mask=description_inputs["attention_mask"],
-            prompt_input_ids=prompts["input_ids"],
-            prompt_attention_mask=prompts["attention_mask"],
-            do_sample=True,
-            return_dict_in_generate=True,
-        )
-        
-        chunk_audios = []
-        for i, audio in enumerate(generation.sequences):
-            audio_data = audio[:generation.audios_length[i]].cpu().float().numpy().squeeze()
-            chunk_audios.append(audio_data)
-        audio_arr = np.concatenate(chunk_audios)
 
-    device_str = str(device)
-    logger.info(
-        f"Took {time.perf_counter() - start:.2f} seconds to generate audio for {len(input.split())} words using {device_str.upper()}"
+# Pydantic model for request body
+class SynthesizeRequest(BaseModel):
+    text: str  # Text to synthesize (expected in Kannada)
+    ref_audio_name: str  # Dropdown of audio names from EXAMPLES
+    ref_text: Optional[str] = None  # Optional, defaults to example ref_text if not provided
+
+class KannadaSynthesizeRequest(BaseModel):
+    text: str  # Text to synthesize (must be in Kannada)
+
+
+# Function to load audio from URL
+def load_audio_from_url(url: str):
+    response = requests.get(url)
+    if response.status_code == 200:
+        audio_data, sample_rate = sf.read(io.BytesIO(response.content))
+        return sample_rate, audio_data
+    raise HTTPException(status_code=500, detail="Failed to load reference audio from URL.")
+
+# Function to synthesize speech
+def synthesize_speech(text: str, ref_audio_name: str, ref_text: str):
+    # Find the matching example
+    ref_audio_url = None
+    for example in EXAMPLES:
+        if example["audio_name"] == ref_audio_name:
+            ref_audio_url = example["audio_url"]
+            if not ref_text:
+                ref_text = example["ref_text"]
+            break
+    
+    if not ref_audio_url:
+        raise HTTPException(status_code=400, detail="Invalid reference audio name.")
+
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Text to synthesize cannot be empty.")
+    
+    if not ref_text or not ref_text.strip():
+        raise HTTPException(status_code=400, detail="Reference text cannot be empty.")
+
+    # Load reference audio from URL
+    sample_rate, audio_data = load_audio_from_url(ref_audio_url)
+
+    # Save reference audio to a temporary file
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
+        sf.write(temp_audio.name, audio_data, samplerate=sample_rate, format='WAV')
+        temp_audio.flush()
+
+        # Generate speech
+        audio = tts_model(text, ref_audio_path=temp_audio.name, ref_text=ref_text)
+
+    # Normalize output
+    if audio.dtype == np.int16:
+        audio = audio.astype(np.float32) / 32768.0
+
+    # Save generated audio to a BytesIO buffer
+    buffer = io.BytesIO()
+    sf.write(buffer, audio, 24000, format='WAV')
+    buffer.seek(0)
+
+    return buffer
+
+@app.post("/audio/speech", response_class=StreamingResponse)
+async def synthesize_kannada(request: KannadaSynthesizeRequest):
+    # Use the Kannada example as fixed reference
+    kannada_example = next(ex for ex in EXAMPLES if ex["audio_name"] == "KAN_F (Happy)")
+    
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="Text to synthesize cannot be empty.")
+    
+    # Use the fixed Kannada reference audio and text
+    audio_buffer = synthesize_speech(
+        text=request.text,
+        ref_audio_name="KAN_F (Happy)",
+        ref_text=kannada_example["ref_text"]
+    )
+    
+    return StreamingResponse(
+        audio_buffer,
+        media_type="audio/wav",
+        headers={"Content-Disposition": "attachment; filename=synthesized_kannada_speech.wav"}
     )
 
-    audio_buffer = io.BytesIO()
-    sf.write(audio_buffer, audio_arr, tts.config.sampling_rate, format=response_format)
-    audio_buffer.seek(0)
-
-    return StreamingResponse(audio_buffer, media_type=f"audio/{response_format}")
-
-def create_in_memory_zip(file_data):
-    in_memory_zip = io.BytesIO()
-    with zipfile.ZipFile(in_memory_zip, 'w') as zipf:
-        for file_name, data in file_data.items():
-            zipf.writestr(file_name, data)
-    in_memory_zip.seek(0)
-    return in_memory_zip
-
-@app.post("/v1/audio/speech_batch")
-async def generate_audio_batch(
-    input: Annotated[List[str], Body()] = config.input,
-    voice: Annotated[List[str], Body()] = config.voice,
-    model: Annotated[str, Body(include_in_schema=False)] = config.model,
-    response_format: Annotated[ResponseFormat, Body()] = config.response_format,
-    speed: Annotated[float, Body(include_in_schema=False)] = SPEED,
-) -> StreamingResponse:
-    tts, tokenizer, description_tokenizer = tts_model_manager.get_or_load_model(model)
-    if speed != SPEED:
-        logger.warning(
-            "Specifying speed isn't supported by this model. Audio will be generated with the default speed"
-        )
-    start = time.perf_counter()
-
-    chunk_size = 15
-    all_chunks = []
-    all_descriptions = []
-    for i, text in enumerate(input):
-        chunks = chunk_text(text, chunk_size)
-        all_chunks.extend(chunks)
-        all_descriptions.extend([voice[i]] * len(chunks))
-
-    description_inputs = description_tokenizer(all_descriptions,
-                                             return_tensors="pt",
-                                             padding=True).to(device)
-    prompts = tokenizer(all_chunks,
-                       return_tensors="pt",
-                       padding=True).to(device)
-
-    set_seed(0)
-    generation = tts.generate(
-        input_ids=description_inputs["input_ids"],
-        attention_mask=description_inputs["attention_mask"],
-        prompt_input_ids=prompts["input_ids"],
-        prompt_attention_mask=prompts["attention_mask"],
-        do_sample=True,
-        return_dict_in_generate=True,
-    )
-
-    audio_outputs = []
-    current_index = 0
-    for i, text in enumerate(input):
-        chunks = chunk_text(text, chunk_size)
-        chunk_audios = []
-        for j in range(len(chunks)):
-            audio_arr = generation.sequences[current_index][:generation.audios_length[current_index]].cpu().float().numpy().squeeze()
-            chunk_audios.append(audio_arr)
-            current_index += 1
-        combined_audio = np.concatenate(chunk_audios)
-        audio_outputs.append(combined_audio)
-
-    file_data = {}
-    for i, audio in enumerate(audio_outputs):
-        file_name = f"out_{i}.{response_format}"
-        audio_bytes = io.BytesIO()
-        sf.write(audio_bytes, audio, tts.config.sampling_rate, format=response_format)
-        audio_bytes.seek(0)
-        file_data[file_name] = audio_bytes.read()
-
-    in_memory_zip = create_in_memory_zip(file_data)
-
-    logger.info(
-        f"Took {time.perf_counter() - start:.2f} seconds to generate audio"
-    )
-
-    return StreamingResponse(in_memory_zip, media_type="application/zip")
 
 # Supported language codes
 SUPPORTED_LANGUAGES = {
@@ -386,6 +258,9 @@ class TranslateManager:
             torch_dtype=torch.float16,
             attn_implementation="flash_attention_2"
         ).to(self.device_type)
+
+        model = torch.compile(model, mode="reduce-overhead")
+        print("Model compiled with torch.compile")
         return tokenizer, model
 
 class ModelManager:
@@ -728,12 +603,17 @@ class ASRModelManager:
     def __init__(self, device_type="cuda"):
         self.device_type = device_type
         self.model_language = {
+            "kannada": "kn"
+        }
+        '''
+        self.model_language = {
             "kannada": "kn", "hindi": "hi", "malayalam": "ml", "assamese": "as", "bengali": "bn",
             "bodo": "brx", "dogri": "doi", "gujarati": "gu", "kashmiri": "ks", "konkani": "kok",
             "maithili": "mai", "manipuri": "mni", "marathi": "mr", "nepali": "ne", "odia": "or",
             "punjabi": "pa", "sanskrit": "sa", "santali": "sat", "sindhi": "sd", "tamil": "ta",
             "telugu": "te", "urdu": "ur"
         }
+        '''
 
 from fastapi import FastAPI, UploadFile
 import torch
@@ -754,11 +634,16 @@ asr_manager = ASRModelManager()
 
 # Language to script mapping
 LANGUAGE_TO_SCRIPT = {
+    "kannada": "kan_Knda"
+}
+'''
+LANGUAGE_TO_SCRIPT = {
     "kannada": "kan_Knda", "hindi": "hin_Deva", "malayalam": "mal_Mlym", "tamil": "tam_Taml",
     "telugu": "tel_Telu", "assamese": "asm_Beng", "bengali": "ben_Beng", "gujarati": "guj_Gujr",
     "marathi": "mar_Deva", "odia": "ory_Orya", "punjabi": "pan_Guru", "urdu": "urd_Arab",
     # Add more as needed
 }
+'''
 
 @app.post("/transcribe/", response_model=TranscriptionResponse)
 async def transcribe_audio(file: UploadFile = File(...), language: str = Query(..., enum=list(asr_manager.model_language.keys()))):
@@ -779,7 +664,6 @@ async def speech_to_speech(
     request: Request,  # Inject Request object from FastAPI
     file: UploadFile = File(...),
     language: str = Query(..., enum=list(asr_manager.model_language.keys())),
-    voice: str = Body(default=config.voice)
 ) -> StreamingResponse:
     # Step 1: Transcribe audio to text
     transcription = await transcribe_audio(file, language)
@@ -794,13 +678,11 @@ async def speech_to_speech(
     processed_text = await chat(request, chat_request)  # Pass the injected request
     logger.info(f"Processed text: {processed_text.response}")
 
+    voice_request = KannadaSynthesizeRequest(text=processed_text.response)
+
     # Step 3: Convert processed text to speech
-    audio_response = await generate_audio(
-        input=processed_text.response,
-        voice=voice,
-        model=tts_config.model,
-        response_format=config.response_format,
-        speed=SPEED
+    audio_response = await synthesize_kannada(
+        voice_request
     )
     return audio_response
 
@@ -845,11 +727,7 @@ if __name__ == "__main__":
         model = AutoModel.from_pretrained(asr_model_name, trust_remote_code=True)
         asr_manager.model_language[selected_config["language"]] = selected_config["components"]["ASR"]["language_code"]
 
-    # Initialize TTS model if present in config
-    if selected_config["components"]["TTS"]:
-        tts_model_name = selected_config["components"]["TTS"]["model"]
-        tts_config.model = tts_model_name  # Update tts_config to use the selected model
-        tts_model_manager.get_or_load_model(tts_model_name)
+
 
     # Initialize Translation models - load all specified models
     if selected_config["components"]["Translation"]:
