@@ -1,0 +1,20 @@
+# Base image with CUDA support
+FROM slabstech/dhwani-server-base  AS model-downloader
+WORKDIR /app
+
+
+COPY dhwani_config.json .
+
+
+# Create a directory for pre-downloaded models
+RUN mkdir -p /app/models
+
+# Define build argument for HF_TOKEN
+ARG HF_TOKEN_DOCKER
+
+# Set environment variable for the build process
+ENV HF_TOKEN=$HF_TOKEN_DOCKER
+
+# Copy and run the model download script
+COPY download_models.py .
+RUN python download_models.py
