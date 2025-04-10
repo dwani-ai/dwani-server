@@ -10,9 +10,9 @@ if not hf_token:
 
 # Define the models to download
 models = {
-    'llm_model': ('google/gemma-3-4b-it', Gemma3ForConditionalGeneration, AutoProcessor),
+    #'llm_model': ('google/gemma-3-4b-it', Gemma3ForConditionalGeneration, AutoProcessor),
     'tts_model': ('ai4bharat/IndicF5', AutoModel, None),
-    'asr_model': ('ai4bharat/indic-conformer-600m-multilingual', AutoModel, None),
+    #'asr_model': ('ai4bharat/indic-conformer-600m-multilingual', AutoModel, None),
     'trans_en_indic': ('ai4bharat/indictrans2-en-indic-dist-200M', AutoModelForSeq2SeqLM, AutoTokenizer),
     'trans_indic_en': ('ai4bharat/indictrans2-indic-en-dist-200M', AutoModelForSeq2SeqLM, AutoTokenizer),
     'trans_indic_indic': ('ai4bharat/indictrans2-indic-indic-dist-320M', AutoModelForSeq2SeqLM, AutoTokenizer),

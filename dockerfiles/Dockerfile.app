@@ -1,7 +1,8 @@
 # Use the pre-built image with models as the base
-FROM slabstech/dhwani-model-server:latest
+FROM slabstech/dhwani-server-models:latest
 WORKDIR /app
 
+COPY dhwani_config.json .
 # Copy application code
 COPY . .
 
