@@ -3,6 +3,34 @@ Latency - Speech to Sppech
 
 A100
 
+2025-04-11 16:10:17,169 - indic_all_server - INFO - Transcribed text: ಕರ್ನಾಟಕ ದ ರಾಜಧಾನಿ ಯಾವುದು
+2025-04-11 16:10:17,170 - indic_all_server - INFO - Received prompt: ಕರ್ನಾಟಕ ದ ರಾಜಧಾನಿ ಯಾವುದು, src_lang: kan_Knda, tgt_lang: kan_Knda
+2025-04-11 16:10:17,419 - indic_all_server - INFO - Translated prompt to English: what is the capital of karnataka
+2025-04-11 16:10:18,455 - indic_all_server - INFO - Generated response: The capital of Karnataka is Bengaluru, also known as Bangalore.
+2025-04-11 16:10:18,456 - indic_all_server - INFO - Generated response: The capital of Karnataka is Bengaluru, also known as Bangalore.
+2025-04-11 16:10:18,676 - indic_all_server - INFO - Translated response to kan_Knda: ಕರ್ನಾಟಕದ ರಾಜಧಾನಿ ಬೆಂಗಳೂರು, ಇದನ್ನು ಬೆಂಗಳೂರು ಎಂದೂ ಕರೆಯಲಾಗುತ್ತದೆ. 
+2025-04-11 16:10:18,677 - indic_all_server - INFO - Processed text: ಕರ್ನಾಟಕದ ರಾಜಧಾನಿ ಬೆಂಗಳೂರು, ಇದನ್ನು ಬೆಂಗಳೂರು ಎಂದೂ ಕರೆಯಲಾಗುತ್ತದೆ. 
+2025-04-11 16:10:22,702 - indic_all_server - INFO - Request to /v1/speech_to_speech took 6.668 seconds
+INFO:     10.16.22.114:28848 - "POST /v1/speech_to_speech?language=kannada HTTP/1.1" 200 OK
+2025-04-11 16:10:26,870 - indic_all_server - INFO - Transcribed text: ಕರ್ನಾಟಕ ದ ರಾಜಧಾನಿ ಯಾವುದು
+2025-04-11 16:10:26,871 - indic_all_server - INFO - Received prompt: ಕರ್ನಾಟಕ ದ ರಾಜಧಾನಿ ಯಾವುದು, src_lang: kan_Knda, tgt_lang: kan_Knda
+2025-04-11 16:10:27,130 - indic_all_server - INFO - Translated prompt to English: what is the capital of karnataka
+2025-04-11 16:10:28,169 - indic_all_server - INFO - Generated response: The capital of Karnataka is Bengaluru, also known as Bangalore.
+2025-04-11 16:10:28,169 - indic_all_server - INFO - Generated response: The capital of Karnataka is Bengaluru, also known as Bangalore.
+2025-04-11 16:10:28,390 - indic_all_server - INFO - Translated response to kan_Knda: ಕರ್ನಾಟಕದ ರಾಜಧಾನಿ ಬೆಂಗಳೂರು, ಇದನ್ನು ಬೆಂಗಳೂರು ಎಂದೂ ಕರೆಯಲಾಗುತ್ತದೆ. 
+2025-04-11 16:10:28,390 - indic_all_server - INFO - Processed text: ಕರ್ನಾಟಕದ ರಾಜಧಾನಿ ಬೆಂಗಳೂರು, ಇದನ್ನು ಬೆಂಗಳೂರು ಎಂದೂ ಕರೆಯಲಾಗುತ್ತದೆ. 
+2025-04-11 16:10:32,440 - indic_all_server - INFO - Request to /v1/speech_to_speech took 6.621 seconds
+INFO:     10.16.31.34:8153 - "POST /v1/speech_to_speech?language=kannada HTTP/1.1" 200 OK
+2025-04-11 16:10:37,165 - indic_all_server - INFO - Transcribed text: ಕರ್ನಾಟಕ ದ ರಾಜಧಾನಿ ಯಾವುದು
+2025-04-11 16:10:37,166 - indic_all_server - INFO - Received prompt: ಕರ್ನಾಟಕ ದ ರಾಜಧಾನಿ ಯಾವುದು, src_lang: kan_Knda, tgt_lang: kan_Knda
+2025-04-11 16:10:37,419 - indic_all_server - INFO - Translated prompt to English: what is the capital of karnataka
+2025-04-11 16:10:38,445 - indic_all_server - INFO - Generated response: The capital of Karnataka is Bengaluru, also known as Bangalore.
+2025-04-11 16:10:38,445 - indic_all_server - INFO - Generated response: The capital of Karnataka is Bengaluru, also known as Bangalore.
+2025-04-11 16:10:38,666 - indic_all_server - INFO - Translated response to kan_Knda: ಕರ್ನಾಟಕದ ರಾಜಧಾನಿ ಬೆಂಗಳೂರು, ಇದನ್ನು ಬೆಂಗಳೂರು ಎಂದೂ ಕರೆಯಲಾಗುತ್ತದೆ. 
+2025-04-11 16:10:38,666 - indic_all_server - INFO - Processed text: ಕರ್ನಾಟಕದ ರಾಜಧಾನಿ ಬೆಂಗಳೂರು, ಇದನ್ನು ಬೆಂಗಳೂರು ಎಂದೂ ಕರೆಯಲಾಗುತ್ತದೆ. 
+2025-04-11 16:10:42,703 - indic_all_server - INFO - Request to /v1/speech_to_speech took 6.515 seconds
+INFO:     10.16.10.93:60579 - "POST /v1/speech_to_speech?language=kannada HTTP/1.1" 200 OK
+
 
 
 L40 S
