@@ -321,7 +321,7 @@ EXAMPLES = [
     {
         "audio_name": "KAN_F (Happy)",
         "audio_url": "https://github.com/AI4Bharat/IndicF5/raw/refs/heads/main/prompts/KAN_F_HAPPY_00001.wav",
-        "ref_text": "ನಮ್‌ ಫ್ರಿಜ್ಜಲ್ಲಿ  ಕೂಲಿಂಗ್‌ ಸಮಸ್ಯೆ ಆಗಿ ನಾನ್‌ ಭಾಳ ದಿನದಿಂದ ಒದ್ದಾಡ್ತಿದ್ದೆ, ಆದ್ರೆ ಅದ್ನೀಗ ಮೆಕಾನಿಕ್ ಆಗಿರೋ ನಿಮ್‌ ಸಹಾಯ್ದಿಂದ ಬಗೆಹರಿಸ್ಕೋಬೋದು ಅಂತಾಗಿ ನಿರಾಳ ಆಯ್ತು ನಂಗೆ.",
+        "ref_text": "ನಮ್‌ ಫ್ರಿಜ್ಜಲ್ಲಿ  ಕೂಲಿಂಗ್‌ ಸಮಸ್ಯೆ ಆಗಿ ನಾನ್‌ ಭಾಳ ದಿನದಿಂದ ಒದ್ದಾಡ್ತಿದ್ದೆ, ಆದ್ರೆ ಅದ್ನೀಗ ಮೆಕಾನಿಕ್ ಆಗಿರೋ ನಿಮ್‌ ಸಹಾಯ್ದಿಂದ ಬಗೆಹರಿಸ್ಕೋಬೋದು ಅಂತಾಗಿ ನಿರಾಳ ಆಯ್ತು ನಂಗೆ。",
         "synth_text": "ಚೆನ್ನೈನ ಶೇರ್ ಆಟೋ ಪ್ರಯಾಣಿಕರ ನಡುವೆ ಆಹಾರವನ್ನು ಹಂಚಿಕೊಂಡು ತಿನ್ನುವುದು ನನಗೆ ಮನಸ್ಸಿಗೆ ತುಂಬಾ ಒಳ್ಳೆಯದೆನಿಸುವ ವಿಷಯ."
     },
 ]
@@ -335,6 +335,12 @@ class SynthesizeRequest(BaseModel):
 class KannadaSynthesizeRequest(BaseModel):
     text: str
 
+    @field_validator("text")
+    def text_must_be_valid(cls, v):
+        if len(v) > 500:
+            raise ValueError("Text cannot exceed 500 characters")
+        return v.strip()
+
 # TTS Functions
 def load_audio_from_url(url: str):
     response = requests.get(url)
@@ -343,7 +349,7 @@ def load_audio_from_url(url: str):
         return sample_rate, audio_data
     raise HTTPException(status_code=500, detail="Failed to load reference audio from URL.")
 
-def synthesize_speech(tts_manager: TTSManager, text: str, ref_audio_name: str, ref_text: str):
+async def synthesize_speech(tts_manager: TTSManager, text: str, ref_audio_name: str, ref_text: str) -> io.BytesIO:
     ref_audio_url = None
     for example in EXAMPLES:
         if example["audio_name"] == ref_audio_name:
@@ -353,23 +359,26 @@ def synthesize_speech(tts_manager: TTSManager, text: str, ref_audio_name: str, r
             break
     
     if not ref_audio_url:
-        raise HTTPException(status_code=400, detail="Invalid reference audio name.")
+        raise HTTPException(status_code=400, detail=f"Invalid reference audio name: {ref_audio_name}")
     if not text.strip():
-        raise HTTPException(status_code=400, detail="Text to synthesize cannot be empty.")
+        raise HTTPException(status_code=400, detail="Text to synthesize cannot be empty")
     if not ref_text or not ref_text.strip():
-        raise HTTPException(status_code=400, detail="Reference text cannot be empty.")
+        raise HTTPException(status_code=400, detail="Reference text cannot be empty")
 
+    logger.info(f"Synthesizing speech for text: {text[:50]}... with ref_audio: {ref_audio_name}")
     sample_rate, audio_data = load_audio_from_url(ref_audio_url)
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
+    
+    async with await asyncio.to_thread(tempfile.NamedTemporaryFile, suffix=".wav", delete=False) as temp_audio:
         sf.write(temp_audio.name, audio_data, samplerate=sample_rate, format='WAV')
         temp_audio.flush()
-        audio = tts_manager.synthesize(text, ref_audio_path=temp_audio.name, ref_text=ref_text)
+        audio = await asyncio.to_thread(tts_manager.synthesize, text, temp_audio.name, ref_text)
 
     if audio.dtype == np.int16:
         audio = audio.astype(np.float32) / 32768.0
     buffer = io.BytesIO()
     sf.write(buffer, audio, 24000, format='WAV')
     buffer.seek(0)
+    logger.info("Speech synthesis completed")
     return buffer
 
 # Supported languages
@@ -414,15 +423,13 @@ class ModelManager:
         self.device_type = device_type
         self.use_distilled = use_distilled
         self.is_lazy_loading = is_lazy_loading
-        # Preload all translation models
         self.preload_models()
 
     def preload_models(self):
-        # Define the core translation pairs to preload
         translation_pairs = [
-            ('eng_Latn', 'kan_Knda', 'eng_indic'),  # English to Indic
-            ('kan_Knda', 'eng_Latn', 'indic_eng'),  # Indic to English
-            ('kan_Knda', 'hin_Deva', 'indic_indic')  # Indic to Indic
+            ('eng_Latn', 'kan_Knda', 'eng_indic'),
+            ('kan_Knda', 'eng_Latn', 'indic_eng'),
+            ('kan_Knda', 'hin_Deva', 'indic_indic')
         ]
         for src_lang, tgt_lang, key in translation_pairs:
             logger.info(f"Preloading translation model for {src_lang} -> {tgt_lang}...")
@@ -545,24 +552,19 @@ translation_configs = []
 async def lifespan(app: FastAPI):
     def load_all_models():
         try:
-            # Load LLM model
             logger.info("Loading LLM model...")
             llm_manager.load()
             logger.info("LLM model loaded successfully")
 
-            # Load TTS model
             logger.info("Loading TTS model...")
             tts_manager.load()
             logger.info("TTS model loaded successfully")
 
-            # Load ASR model
             logger.info("Loading ASR model...")
             asr_manager.load()
             logger.info("ASR model loaded successfully")
 
-            # Translation models are preloaded in ModelManager constructor
             logger.info("Translation models already preloaded in ModelManager initialization.")
-
             logger.info("All models loaded successfully")
         except Exception as e:
             logger.error(f"Error loading models: {str(e)}")
@@ -776,16 +778,18 @@ async def chat_v2(
 # Include LLM Router
 app.include_router(llm_router)
 
-# Other API Endpoints
+# Improved Endpoints
 @app.post("/audio/speech", response_class=StreamingResponse)
 async def synthesize_kannada(request: KannadaSynthesizeRequest):
     if not tts_manager.model:
-        raise HTTPException(status_code=503, detail="TTS model not loaded")
-    kannada_example = next(ex for ex in EXAMPLES if ex["audio_name"] == "KAN_F (Happy)")
-    if not request.text.strip():
-        raise HTTPException(status_code=400, detail="Text to synthesize cannot be empty.")
+        raise HTTPException(status_code=503, detail="TTS model not loaded. Please load models via /v1/load_all_models.")
     
-    audio_buffer = synthesize_speech(
+    kannada_example = next((ex for ex in EXAMPLES if ex["audio_name"] == "KAN_F (Happy)"), None)
+    if not kannada_example:
+        raise HTTPException(status_code=500, detail="Reference audio configuration not found.")
+
+    logger.info(f"Received speech synthesis request for text: {request.text[:50]}...")
+    audio_buffer = await synthesize_speech(
         tts_manager,
         text=request.text,
         ref_audio_name="KAN_F (Happy)",
@@ -796,6 +800,118 @@ async def synthesize_kannada(request: KannadaSynthesizeRequest):
         audio_buffer,
         media_type="audio/wav",
         headers={"Content-Disposition": "attachment; filename=synthesized_kannada_speech.wav"}
+    )
+
+@app.post("/transcribe/", response_model=TranscriptionResponse)
+async def transcribe_audio(file: UploadFile = File(...), language: str = Query(..., enum=list(asr_manager.model_language.keys()))):
+    if not asr_manager.model:
+        raise HTTPException(status_code=503, detail="ASR model not loaded. Please load models via /v1/load_all_models.")
+    
+    audio_data = await file.read()
+    if not audio_data:
+        raise HTTPException(status_code=400, detail="Uploaded audio file is empty")
+    if len(audio_data) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="Audio file exceeds 10MB limit")
+
+    logger.info(f"Transcribing audio file: {file.filename} in language: {language}")
+    try:
+        wav, sr = torchaudio.load(io.BytesIO(audio_data))
+        wav = torch.mean(wav, dim=0, keepdim=True)
+        target_sample_rate = 16000
+        if sr != target_sample_rate:
+            logger.info(f"Resampling audio from {sr}Hz to {target_sample_rate}Hz")
+            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sample_rate)
+            wav = resampler(wav)
+        transcription_rnnt = asr_manager.model(wav, asr_manager.model_language[language], "rnnt")
+        logger.info(f"Transcription completed: {transcription_rnnt[:50]}...")
+        return TranscriptionResponse(text=transcription_rnnt)
+    except Exception as e:
+        logger.error(f"Error in transcription: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+async def transcribe_step(audio_data: bytes, language: str) -> str:
+    if not asr_manager.model:
+        raise HTTPException(status_code=503, detail="ASR model not loaded")
+    wav, sr = torchaudio.load(io.BytesIO(audio_data))
+    wav = torch.mean(wav, dim=0, keepdim=True)
+    target_sample_rate = 16000
+    if sr != target_sample_rate:
+        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sample_rate)
+        wav = resampler(wav)
+    return asr_manager.model(wav, asr_manager.model_language[language], "rnnt")
+
+async def synthesize_step(text: str) -> io.BytesIO:
+    kannada_example = next((ex for ex in EXAMPLES if ex["audio_name"] == "KAN_F (Happy)"), None)
+    if not kannada_example:
+        raise HTTPException(status_code=500, detail="Reference audio configuration not found")
+    return await synthesize_speech(tts_manager, text, "KAN_F (Happy)", kannada_example["ref_text"])
+
+@app.post("/v1/speech_to_speech", response_class=StreamingResponse)
+async def speech_to_speech(
+    request: Request,
+    file: UploadFile = File(...),
+    language: str = Query(..., enum=list(asr_manager.model_language.keys())),
+):
+    if not tts_manager.model or not asr_manager.model:
+        raise HTTPException(status_code=503, detail="TTS or ASR model not loaded. Please load models via /v1/load_all_models.")
+    
+    audio_data = await file.read()
+    if not audio_data:
+        raise HTTPException(status_code=400, detail="Uploaded audio file is empty")
+    if len(audio_data) > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="Audio file exceeds 10MB limit")
+
+    logger.info(f"Processing speech-to-speech for file: {file.filename} in language: {language}")
+    try:
+        # Step 1: Transcribe
+        transcription = await transcribe_step(audio_data, language)
+        logger.info(f"Transcribed text: {transcription[:50]}...")
+
+        # Step 2: Process with LLM
+        chat_request = ChatRequest(
+            prompt=transcription,
+            src_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda"),
+            tgt_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda")
+        )
+        processed_text = await chat(request, chat_request)
+        logger.info(f"Processed text: {processed_text.response[:50]}...")
+
+        # Step 3: Synthesize
+        audio_buffer = await synthesize_step(processed_text.response)
+        logger.info("Speech-to-speech processing completed")
+        
+        return StreamingResponse(
+            audio_buffer,
+            media_type="audio/wav",
+            headers={"Content-Disposition": "attachment; filename=speech_to_speech_output.wav"}
+        )
+    except Exception as e:
+        logger.error(f"Error in speech-to-speech pipeline: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Speech-to-speech failed: {str(e)}")
+
+@app.get("/v1/health")
+async def health_check():
+    status = {
+        "status": "healthy",
+        "model": settings.llm_model_name,
+        "llm_loaded": llm_manager.is_loaded,
+        "tts_loaded": bool(tts_manager.model),
+        "asr_loaded": bool(asr_manager.model),
+        "translation_models": list(model_manager.models.keys()),
+        "device": device,
+        "cuda_available": cuda_available,
+        "cuda_version": cuda_version if cuda_available else "N/A"
+    }
+    logger.info("Health check requested")
+    return status
+
+@app.get("/")
+async def home():
+    logger.info("Root endpoint accessed, redirecting to docs")
+    return JSONResponse(
+        content={"message": "Welcome to Dhwani API! Redirecting to documentation..."},
+        headers={"Location": "/docs"},
+        status_code=302
     )
 
 @app.post("/translate", response_model=TranslationResponse)
@@ -832,14 +948,6 @@ async def translate(request: TranslationRequest, translate_manager: TranslateMan
     translations = ip.postprocess_batch(generated_tokens, lang=request.tgt_lang)
     return TranslationResponse(translations=translations)
 
-@app.get("/v1/health")
-async def health_check():
-    return {"status": "healthy", "model": settings.llm_model_name}
-
-@app.get("/")
-async def home():
-    return RedirectResponse(url="/docs")
-
 @app.post("/v1/translate", response_model=TranslationResponse)
 async def translate_endpoint(request: TranslationRequest):
     logger.info(f"Received translation request: {request.dict()}")
@@ -854,46 +962,6 @@ async def translate_endpoint(request: TranslationRequest):
     except Exception as e:
         logger.error(f"Unexpected error during translation: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
-
-@app.post("/transcribe/", response_model=TranscriptionResponse)
-async def transcribe_audio(file: UploadFile = File(...), language: str = Query(..., enum=list(asr_manager.model_language.keys()))):
-    if not asr_manager.model:
-        raise HTTPException(status_code=503, detail="ASR model not loaded")
-    try:
-        wav, sr = torchaudio.load(file.file)
-        wav = torch.mean(wav, dim=0, keepdim=True)
-        target_sample_rate = 16000
-        if sr != target_sample_rate:
-            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sample_rate)
-            wav = resampler(wav)
-        transcription_rnnt = asr_manager.model(wav, asr_manager.model_language[language], "rnnt")
-        return TranscriptionResponse(text=transcription_rnnt)
-    except Exception as e:
-        logger.error(f"Error in transcription: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
-
-@app.post("/v1/speech_to_speech")
-async def speech_to_speech(
-    request: Request,
-    file: UploadFile = File(...),
-    language: str = Query(..., enum=list(asr_manager.model_language.keys())),
-) -> StreamingResponse:
-    if not tts_manager.model:
-        raise HTTPException(status_code=503, detail="TTS model not loaded")
-    transcription = await transcribe_audio(file, language)
-    logger.info(f"Transcribed text: {transcription.text}")
-
-    chat_request = ChatRequest(
-        prompt=transcription.text,
-        src_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda"),
-        tgt_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda")
-    )
-    processed_text = await chat(request, chat_request)
-    logger.info(f"Processed text: {processed_text.response}")
-
-    voice_request = KannadaSynthesizeRequest(text=processed_text.response)
-    audio_response = await synthesize_kannada(voice_request)
-    return audio_response
 
 LANGUAGE_TO_SCRIPT = {
     "kannada": "kan_Knda"
