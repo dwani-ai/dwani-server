@@ -6,4 +6,4 @@ docker push slabstech/dhwani-server-base
 
 docker build -f Dockerfile.app -t slabstech/dhwani-server-model .
 
-docker push slabstech/dhwani-server-model  
+docker push slabstech/dhwani-model-server

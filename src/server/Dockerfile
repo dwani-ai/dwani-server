@@ -1,16 +1,7 @@
-FROM slabstech/dhwani-server-base
+FROM slabstech/dhwani-model-server 
 WORKDIR /app
 
-COPY dhwani_config.json .
-
-# Create a directory for pre-downloaded models
-COPY . .
-
-# Set up user
-RUN useradd -ms /bin/bash appuser \
-    && chown -R appuser:appuser /app
-USER appuser
-
+ENV HF_HOME=/data/huggingface
 # Expose port
 EXPOSE 7860
 
