@@ -1,0 +1,27 @@
+services:
+  dhwani-server:
+    image: slabstech/dhwani-model-server
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dhwani-server
+    user: appuser
+    environment:
+      - HF_HOME=/data/huggingface
+    volumes:
+      - huggingface_data:/data/huggingface
+    ports:
+      - "7860:7860"
+    command: ["python", "/app/src/server/main.py", "--host", "0.0.0.0", "--port", "7860", "--config", "config_two"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  huggingface_data:
+    name: huggingface_data
