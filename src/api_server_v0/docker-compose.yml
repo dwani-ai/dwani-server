@@ -1,0 +1,33 @@
+services:
+  dhwani-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: slabstech/dhwani-api-server
+    container_name: dhwani-api
+    ports:
+      - "7860:7860"
+    environment:
+      - API_KEY_SECRET=${API_KEY_SECRET:-your-secret-key}
+      - EXTERNAL_TTS_URL=${EXTERNAL_TTS_URL:-https://example.com/tts}
+      - EXTERNAL_ASR_URL=${EXTERNAL_ASR_URL:-https://example.com/asr}
+      - EXTERNAL_TEXT_GEN_URL=${EXTERNAL_TEXT_GEN_URL:-https://example.com/text-gen}
+      - EXTERNAL_AUDIO_PROC_URL=${EXTERNAL_AUDIO_PROC_URL:-https://example.com/audio}
+      - DEFAULT_ADMIN_USERNAME=${DEFAULT_ADMIN_USERNAME:-admin}
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-admin54321}
+      - TOKEN_EXPIRATION_MINUTES=${TOKEN_EXPIRATION_MINUTES:-1440}
+      - REFRESH_TOKEN_EXPIRATION_DAYS=${REFRESH_TOKEN_EXPIRATION_DAYS:-7}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - dhwani-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/v1/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  dhwani-data:
+    name: dhwani-data
