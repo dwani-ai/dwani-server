@@ -88,19 +88,23 @@ class LLMManager:
         self.is_loaded = False
         logger.info(f"LLMManager initialized with model {model_name} on {self.device}")
 
-    def load(self):
+    async def load(self):
         if not self.is_loaded:
             try:
-                self.model = Gemma3ForConditionalGeneration.from_pretrained(
+                self.model = await asyncio.to_thread(
+                    Gemma3ForConditionalGeneration.from_pretrained,
                     self.model_name,
                     device_map="auto",
                     quantization_config=quantization_config,
                     torch_dtype=self.torch_dtype
                 )
                 self.model.eval()
-                self.processor = AutoProcessor.from_pretrained(self.model_name)
+                self.processor = await asyncio.to_thread(
+                    AutoProcessor.from_pretrained,
+                    self.model_name
+                )
                 self.is_loaded = True
-                logger.info(f"LLM {self.model_name} loaded on {self.device}")
+                logger.info(f"LLM {self.model_name} loaded asynchronously on {self.device}")
             except Exception as e:
                 logger.error(f"Failed to load LLM: {str(e)}")
                 raise
@@ -117,7 +121,7 @@ class LLMManager:
 
     async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
         if not self.is_loaded:
-            self.load()
+            await self.load()
 
         messages_vlm = [
             {
@@ -159,7 +163,7 @@ class LLMManager:
 
     async def vision_query(self, image: Image.Image, query: str) -> str:
         if not self.is_loaded:
-            self.load()
+            await self.load()
 
         messages_vlm = [
             {
@@ -208,7 +212,7 @@ class LLMManager:
 
     async def chat_v2(self, image: Image.Image, query: str) -> str:
         if not self.is_loaded:
-            self.load()
+            await self.load()
 
         messages_vlm = [
             {
@@ -262,15 +266,16 @@ class TTSManager:
         self.model = None
         self.repo_id = "ai4bharat/IndicF5"
 
-    def load(self):
+    async def load(self):
         if not self.model:
-            logger.info("Loading TTS model IndicF5...")
-            self.model = AutoModel.from_pretrained(
+            logger.info("Loading TTS model IndicF5 asynchronously...")
+            self.model = await asyncio.to_thread(
+                AutoModel.from_pretrained,
                 self.repo_id,
                 trust_remote_code=True
             )
             self.model = self.model.to(self.device_type)
-            logger.info("TTS model IndicF5 loaded")
+            logger.info("TTS model IndicF5 loaded asynchronously")
 
     def synthesize(self, text, ref_audio_path, ref_text):
         if not self.model:
@@ -354,7 +359,7 @@ class TranslateManager:
         self.tgt_lang = tgt_lang
         self.use_distilled = use_distilled
 
-    def load(self):
+    async def load(self):
         if not self.tokenizer or not self.model:
             if self.src_lang.startswith("eng") and not self.tgt_lang.startswith("eng"):
                 model_name = "ai4bharat/indictrans2-en-indic-dist-200M" if self.use_distilled else "ai4bharat/indictrans2-en-indic-1B"
@@ -365,11 +370,13 @@ class TranslateManager:
             else:
                 raise ValueError("Invalid language combination")
 
-            self.tokenizer = AutoTokenizer.from_pretrained(
+            self.tokenizer = await asyncio.to_thread(
+                AutoTokenizer.from_pretrained,
                 model_name,
                 trust_remote_code=True
             )
-            self.model = AutoModelForSeq2SeqLM.from_pretrained(
+            self.model = await asyncio.to_thread(
+                AutoModelForSeq2SeqLM.from_pretrained,
                 model_name,
                 trust_remote_code=True,
                 torch_dtype=torch.float16,
@@ -377,7 +384,7 @@ class TranslateManager:
             )
             self.model = self.model.to(self.device_type)
             self.model = torch.compile(self.model, mode="reduce-overhead")
-            logger.info(f"Translation model {model_name} loaded")
+            logger.info(f"Translation model {model_name} loaded asynchronously")
 
 class ModelManager:
     def __init__(self, device_type=device, use_distilled=True, is_lazy_loading=False):
@@ -386,18 +393,18 @@ class ModelManager:
         self.use_distilled = use_distilled
         self.is_lazy_loading = is_lazy_loading
 
-    def load_model(self, src_lang, tgt_lang, key):
-        logger.info(f"Loading translation model for {src_lang} -> {tgt_lang}")
+    async def load_model(self, src_lang, tgt_lang, key):
+        logger.info(f"Loading translation model for {src_lang} -> {tgt_lang} asynchronously")
         translate_manager = TranslateManager(src_lang, tgt_lang, self.device_type, self.use_distilled)
-        translate_manager.load()
+        await translate_manager.load()
         self.models[key] = translate_manager
-        logger.info(f"Loaded translation model for {key}")
+        logger.info(f"Loaded translation model for {key} asynchronously")
 
     def get_model(self, src_lang, tgt_lang):
         key = self._get_model_key(src_lang, tgt_lang)
         if key not in self.models:
             if self.is_lazy_loading:
-                self.load_model(src_lang, tgt_lang, key)
+                asyncio.create_task(self.load_model(src_lang, tgt_lang, key))
             else:
                 raise ValueError(f"Model for {key} is not preloaded and lazy loading is disabled.")
         return self.models.get(key)
@@ -418,15 +425,16 @@ class ASRModelManager:
         self.model = None
         self.model_language = {"kannada": "kn"}
 
-    def load(self):
+    async def load(self):
         if not self.model:
-            logger.info("Loading ASR model...")
-            self.model = AutoModel.from_pretrained(
+            logger.info("Loading ASR model asynchronously...")
+            self.model = await asyncio.to_thread(
+                AutoModel.from_pretrained,
                 "ai4bharat/indic-conformer-600m-multilingual",
                 trust_remote_code=True
             )
             self.model = self.model.to(self.device_type)
-            logger.info("ASR model loaded")
+            logger.info("ASR model loaded asynchronously")
 
 # Global Managers
 llm_manager = LLMManager(settings.llm_model_name)
@@ -476,48 +484,34 @@ translation_configs = []
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    def load_all_models():
+    async def load_all_models():
         try:
-            # Load LLM model
-            logger.info("Loading LLM model...")
-            llm_manager.load()
-            logger.info("LLM model loaded successfully")
+            tasks = [
+                llm_manager.load(),
+                tts_manager.load(),
+                asr_manager.load(),
+            ]
 
-            # Load TTS model
-            logger.info("Loading TTS model...")
-            tts_manager.load()
-            logger.info("TTS model loaded successfully")
-
-            # Load ASR model
-            logger.info("Loading ASR model...")
-            asr_manager.load()
-            logger.info("ASR model loaded successfully")
-
-            # Load translation models
             translation_tasks = [
-                ('eng_Latn', 'kan_Knda', 'eng_indic'),
-                ('kan_Knda', 'eng_Latn', 'indic_eng'),
-                ('kan_Knda', 'hin_Deva', 'indic_indic'),
+                model_manager.load_model('eng_Latn', 'kan_Knda', 'eng_indic'),
+                model_manager.load_model('kan_Knda', 'eng_Latn', 'indic_eng'),
+                model_manager.load_model('kan_Knda', 'hin_Deva', 'indic_indic'),
             ]
             
             for config in translation_configs:
                 src_lang = config["src_lang"]
                 tgt_lang = config["tgt_lang"]
                 key = model_manager._get_model_key(src_lang, tgt_lang)
-                translation_tasks.append((src_lang, tgt_lang, key))
+                translation_tasks.append(model_manager.load_model(src_lang, tgt_lang, key))
 
-            for src_lang, tgt_lang, key in translation_tasks:
-                logger.info(f"Loading translation model for {src_lang} -> {tgt_lang}...")
-                model_manager.load_model(src_lang, tgt_lang, key)
-                logger.info(f"Translation model for {key} loaded successfully")
-
-            logger.info("All models loaded successfully")
+            await asyncio.gather(*tasks, *translation_tasks)
+            logger.info("All models loaded successfully asynchronously")
         except Exception as e:
             logger.error(f"Error loading models: {str(e)}")
             raise
 
-    logger.info("Starting sequential model loading...")
-    load_all_models()
+    logger.info("Starting asynchronous model loading...")
+    await load_all_models()
     yield
     llm_manager.unload()
     logger.info("Server shutdown complete")
@@ -608,11 +602,11 @@ async def perform_internal_translation(sentences: List[str], src_lang: str, tgt_
     except ValueError as e:
         logger.info(f"Model not preloaded: {str(e)}, loading now...")
         key = model_manager._get_model_key(src_lang, tgt_lang)
-        model_manager.load_model(src_lang, tgt_lang, key)
+        await model_manager.load_model(src_lang, tgt_lang, key)
         translate_manager = model_manager.get_model(src_lang, tgt_lang)
     
     if not translate_manager.model:
-        translate_manager.load()
+        await translate_manager.load()
     
     request = TranslationRequest(sentences=sentences, src_lang=src_lang, tgt_lang=tgt_lang)
     response = await translate(request, translate_manager)
@@ -641,7 +635,7 @@ async def unload_all_models():
 async def load_all_models():
     try:
         logger.info("Starting to load all models...")
-        llm_manager.load()
+        await llm_manager.load()
         logger.info("All models loaded successfully")
         return {"status": "success", "message": "All models loaded"}
     except Exception as e:
