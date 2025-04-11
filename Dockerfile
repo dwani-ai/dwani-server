@@ -1,6 +1,7 @@
-FROM slabstech/dhwani-model-server 
+FROM slabstech/dhwani-server-base
 WORKDIR /app
 
+COPY . .
 ENV HF_HOME=/data/huggingface
 # Expose port
 EXPOSE 7860
