@@ -6,12 +6,6 @@ WORKDIR /app
 # Copy application code
 COPY . .
 
-# Create appuser and set permissions for /app and /data
-RUN useradd -ms /bin/bash appuser \
-    && mkdir -p /data \
-    && chown -R appuser:appuser /app /data
-
-USER appuser
 
 # Expose port from settings
 EXPOSE 7860

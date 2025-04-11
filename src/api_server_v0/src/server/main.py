@@ -615,7 +615,79 @@ async def visual_query(
     except ValueError as e:
         logger.error(f"Invalid JSON response: {str(e)}")
         raise HTTPException(status_code=500, detail="Invalid response format from visual query service")
+    
+# Ensure these imports are at the top with other imports
+from fastapi.responses import StreamingResponse
+from enum import Enum
 
+# Define supported languages for validation
+class SupportedLanguage(str, Enum):
+    kannada = "kannada"
+    hindi = "hindi"
+    tamil = "tamil"
+
+# Add the speech-to-speech endpoint
+@app.post("/v1/speech_to_speech",
+          summary="Speech-to-Speech Conversion",
+          description="Convert input speech to processed speech by calling an external speech-to-speech API. Rate limited to 5 requests per minute per user. Requires authentication.",
+          tags=["Audio"],
+          responses={
+              200: {"description": "Audio stream", "content": {"audio/mp3": {"example": "Binary audio data"}}},
+              400: {"description": "Invalid input"},
+              401: {"description": "Unauthorized - Token required"},
+              429: {"description": "Rate limit exceeded"},
+              504: {"description": "External API timeout"},
+              500: {"description": "External API error"}
+          })
+@limiter.limit(settings.speech_rate_limit)
+async def speech_to_speech(
+    request: Request,
+    file: UploadFile = File(..., description="Audio file to process"),
+    language: SupportedLanguage = Query(..., description="Language of the audio (kannada, hindi, tamil)"),
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+) -> StreamingResponse:
+    user_id = await get_current_user(credentials)
+    logger.info("Processing speech-to-speech request", extra={
+        "endpoint": "/v1/speech_to_speech",
+        "audio_filename": file.filename,  # Changed from 'filename' to avoid KeyError
+        "language": language,
+        "client_ip": get_remote_address(request),
+        "user_id": user_id
+    })
+
+    try:
+        file_content = await file.read()
+        files = {"file": (file.filename, file_content, file.content_type)}
+        external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/v1/speech_to_speech?language={language}"
+
+        response = requests.post(
+            external_url,
+            files=files,
+            headers={"accept": "application/json"},
+            stream=True,
+            timeout=60
+        )
+        response.raise_for_status()
+
+        headers = {
+            "Content-Disposition": f"inline; filename=\"speech.mp3\"",
+            "Cache-Control": "no-cache",
+            "Content-Type": "audio/mp3"
+        }
+
+        return StreamingResponse(
+            response.iter_content(chunk_size=8192),
+            media_type="audio/mp3",
+            headers=headers
+        )
+
+    except requests.Timeout:
+        logger.error("External speech-to-speech API timed out", extra={"user_id": user_id})
+        raise HTTPException(status_code=504, detail="External API timeout")
+    except requests.RequestException as e:
+        logger.error(f"External speech-to-speech API error: {str(e)}", extra={"user_id": user_id})
+        raise HTTPException(status_code=500, detail=f"External API error: {str(e)}")
+    
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the FastAPI server.")
     parser.add_argument("--port", type=int, default=settings.port, help="Port to run the server on.")
