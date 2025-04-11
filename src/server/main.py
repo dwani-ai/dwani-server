@@ -5,7 +5,7 @@ from time import time
 from typing import List
 import tempfile
 import uvicorn
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Body, Form
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Body, Form, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from PIL import Image
@@ -79,31 +79,44 @@ quantization_config = BitsAndBytesConfig(
 
 # LLM Manager
 class LLMManager:
-    def __init__(self, model_name: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+    def __init__(self, model_name: str, device: str = device):
         self.model_name = model_name
         self.device = torch.device(device)
-        self.torch_dtype = torch.bfloat16 if self.device.type != "cpu" else torch.float32
+        self.torch_dtype = torch_dtype
         self.model = None
         self.processor = None
         self.is_loaded = False
+        self.token_cache = {}
         logger.info(f"LLMManager initialized with model {model_name} on {self.device}")
 
     def load(self):
         if not self.is_loaded:
             try:
+                if self.device.type == "cuda":
+                    torch.set_float32_matmul_precision('high')
+                    logger.info("Enabled TF32 matrix multiplication for improved performance")
+
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=self.torch_dtype,
+                    bnb_4bit_use_double_quant=True
+                )
+
                 self.model = Gemma3ForConditionalGeneration.from_pretrained(
                     self.model_name,
                     device_map="auto",
                     quantization_config=quantization_config,
-                    torch_dtype=self.torch_dtype
-                )
-                self.model.eval()
-                self.processor = AutoProcessor.from_pretrained(self.model_name)
+                    torch_dtype=self.torch_dtype,
+                    max_memory={0: "10GiB"}
+                ).eval()
+
+                self.processor = AutoProcessor.from_pretrained(self.model_name, use_fast=True)
                 self.is_loaded = True
-                logger.info(f"LLM {self.model_name} loaded on {self.device}")
+                logger.info(f"LLM {self.model_name} loaded on {self.device} with 4-bit quantization and fast processor")
             except Exception as e:
                 logger.error(f"Failed to load LLM: {str(e)}")
-                raise
+                raise HTTPException(status_code=500, detail=f"Model loading failed: {str(e)}")
 
     def unload(self):
         if self.is_loaded:
@@ -113,11 +126,17 @@ class LLMManager:
                 torch.cuda.empty_cache()
                 logger.info(f"GPU memory allocated after unload: {torch.cuda.memory_allocated()}")
             self.is_loaded = False
+            self.token_cache.clear()
             logger.info(f"LLM {self.model_name} unloaded from {self.device}")
 
-    async def generate(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
+    async def generate(self, prompt: str, max_tokens: int = settings.max_tokens, temperature: float = 0.7) -> str:
         if not self.is_loaded:
             self.load()
+
+        cache_key = f"prompt_{prompt}"
+        if cache_key in self.token_cache and "response" in self.token_cache[cache_key]:
+            logger.info("Using cached response")
+            return self.token_cache[cache_key]["response"]
 
         messages_vlm = [
             {
@@ -131,29 +150,37 @@ class LLMManager:
         ]
 
         try:
-            inputs_vlm = self.processor.apply_chat_template(
-                messages_vlm,
-                add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt"
-            ).to(self.device, dtype=torch.bfloat16)
+            if cache_key in self.token_cache and "inputs" in self.token_cache[cache_key]:
+                inputs_vlm = self.token_cache[cache_key]["inputs"]
+                logger.info("Using cached tokenized input")
+            else:
+                inputs_vlm = self.processor.apply_chat_template(
+                    messages_vlm,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt"
+                ).to(self.device, dtype=torch.bfloat16)
+                self.token_cache[cache_key] = {"inputs": inputs_vlm}
         except Exception as e:
             logger.error(f"Error in tokenization: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Tokenization failed: {str(e)}")
 
         input_len = inputs_vlm["input_ids"].shape[-1]
+        adjusted_max_tokens = min(max_tokens, max(20, input_len * 2))
 
         with torch.inference_mode():
             generation = self.model.generate(
                 **inputs_vlm,
-                max_new_tokens=max_tokens,
+                max_new_tokens=adjusted_max_tokens,
                 do_sample=True,
+                top_p=0.9,
                 temperature=temperature
             )
             generation = generation[0][input_len:]
 
         response = self.processor.decode(generation, skip_special_tokens=True)
+        self.token_cache[cache_key]["response"] = response
         logger.info(f"Generated response: {response}")
         return response
 
@@ -164,47 +191,53 @@ class LLMManager:
         messages_vlm = [
             {
                 "role": "system",
-                "content": [{"type": "text", "text": "You are Dhwani, a helpful assistant. Summarize your answer in maximum 1 sentence."}]
+                "content": [{"type": "text", "text": "You are Dhwani, a helpful assistant. Summarize your answer in one sentence maximum."}]
             },
             {
                 "role": "user",
-                "content": []
+                "content": [{"type": "text", "text": query}] + ([{"type": "image", "image": image}] if image else [])
             }
         ]
 
-        messages_vlm[1]["content"].append({"type": "text", "text": query})
-        if image and image.size[0] > 0 and image.size[1] > 0:
-            messages_vlm[1]["content"].insert(0, {"type": "image", "image": image})
-            logger.info(f"Received valid image for processing")
-        else:
-            logger.info("No valid image provided, processing text only")
+        cache_key = f"vision_{query}_{'image' if image else 'no_image'}"
+        if cache_key in self.token_cache and "response" in self.token_cache[cache_key]:
+            logger.info("Using cached response")
+            return self.token_cache[cache_key]["response"]
 
         try:
-            inputs_vlm = self.processor.apply_chat_template(
-                messages_vlm,
-                add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt"
-            ).to(self.device, dtype=torch.bfloat16)
+            if cache_key in self.token_cache and "inputs" in self.token_cache[cache_key]:
+                inputs_vlm = self.token_cache[cache_key]["inputs"]
+                logger.info("Using cached tokenized input")
+            else:
+                inputs_vlm = self.processor.apply_chat_template(
+                    messages_vlm,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt"
+                ).to(self.device, dtype=torch.bfloat16)
+                self.token_cache[cache_key] = {"inputs": inputs_vlm}
         except Exception as e:
             logger.error(f"Error in apply_chat_template: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to process input: {str(e)}")
 
         input_len = inputs_vlm["input_ids"].shape[-1]
+        adjusted_max_tokens = min(512, max(20, input_len * 2))
 
         with torch.inference_mode():
             generation = self.model.generate(
                 **inputs_vlm,
-                max_new_tokens=512,
+                max_new_tokens=adjusted_max_tokens,
                 do_sample=True,
+                top_p=0.9,
                 temperature=0.7
             )
             generation = generation[0][input_len:]
 
-        decoded = self.processor.decode(generation, skip_special_tokens=True)
-        logger.info(f"Vision query response: {decoded}")
-        return decoded
+        response = self.processor.decode(generation, skip_special_tokens=True)
+        self.token_cache[cache_key]["response"] = response
+        logger.info(f"Vision query response: {response}")
+        return response
 
     async def chat_v2(self, image: Image.Image, query: str) -> str:
         if not self.is_loaded:
@@ -217,43 +250,49 @@ class LLMManager:
             },
             {
                 "role": "user",
-                "content": []
+                "content": [{"type": "text", "text": query}] + ([{"type": "image", "image": image}] if image else [])
             }
         ]
 
-        messages_vlm[1]["content"].append({"type": "text", "text": query})
-        if image and image.size[0] > 0 and image.size[1] > 0:
-            messages_vlm[1]["content"].insert(0, {"type": "image", "image": image})
-            logger.info(f"Received valid image for processing")
-        else:
-            logger.info("No valid image provided, processing text only")
+        cache_key = f"chat_v2_{query}_{'image' if image else 'no_image'}"
+        if cache_key in self.token_cache and "response" in self.token_cache[cache_key]:
+            logger.info("Using cached response")
+            return self.token_cache[cache_key]["response"]
 
         try:
-            inputs_vlm = self.processor.apply_chat_template(
-                messages_vlm,
-                add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt"
-            ).to(self.device, dtype=torch.bfloat16)
+            if cache_key in self.token_cache and "inputs" in self.token_cache[cache_key]:
+                inputs_vlm = self.token_cache[cache_key]["inputs"]
+                logger.info("Using cached tokenized input")
+            else:
+                inputs_vlm = self.processor.apply_chat_template(
+                    messages_vlm,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt"
+                ).to(self.device, dtype=torch.bfloat16)
+                self.token_cache[cache_key] = {"inputs": inputs_vlm}
         except Exception as e:
             logger.error(f"Error in apply_chat_template: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to process input: {str(e)}")
 
         input_len = inputs_vlm["input_ids"].shape[-1]
+        adjusted_max_tokens = min(512, max(20, input_len * 2))
 
         with torch.inference_mode():
             generation = self.model.generate(
                 **inputs_vlm,
-                max_new_tokens=512,
+                max_new_tokens=adjusted_max_tokens,
                 do_sample=True,
+                top_p=0.9,
                 temperature=0.7
             )
             generation = generation[0][input_len:]
 
-        decoded = self.processor.decode(generation, skip_special_tokens=True)
-        logger.info(f"Chat_v2 response: {decoded}")
-        return decoded
+        response = self.processor.decode(generation, skip_special_tokens=True)
+        self.token_cache[cache_key]["response"] = response
+        logger.info(f"Chat_v2 response: {response}")
+        return response
 
 # TTS Manager
 class TTSManager:
@@ -348,68 +387,61 @@ SUPPORTED_LANGUAGES = {
 class TranslateManager:
     def __init__(self, src_lang, tgt_lang, device_type=device, use_distilled=True):
         self.device_type = device_type
-        self.tokenizer = None
-        self.model = None
-        self.src_lang = src_lang
-        self.tgt_lang = tgt_lang
-        self.use_distilled = use_distilled
+        self.tokenizer, self.model = self.initialize_model(src_lang, tgt_lang, use_distilled)
 
-    def load(self):
-        if not self.tokenizer or not self.model:
-            if self.src_lang.startswith("eng") and not self.tgt_lang.startswith("eng"):
-                model_name = "ai4bharat/indictrans2-en-indic-dist-200M" if self.use_distilled else "ai4bharat/indictrans2-en-indic-1B"
-            elif not self.src_lang.startswith("eng") and self.tgt_lang.startswith("eng"):
-                model_name = "ai4bharat/indictrans2-indic-en-dist-200M" if self.use_distilled else "ai4bharat/indictrans2-indic-en-1B"
-            elif not self.src_lang.startswith("eng") and not self.tgt_lang.startswith("eng"):
-                model_name = "ai4bharat/indictrans2-indic-indic-dist-320M" if self.use_distilled else "ai4bharat/indictrans2-indic-indic-1B"
-            else:
-                raise ValueError("Invalid language combination")
+    def initialize_model(self, src_lang, tgt_lang, use_distilled):
+        if src_lang.startswith("eng") and not tgt_lang.startswith("eng"):
+            model_name = "ai4bharat/indictrans2-en-indic-dist-200M" if use_distilled else "ai4bharat/indictrans2-en-indic-1B"
+        elif not src_lang.startswith("eng") and tgt_lang.startswith("eng"):
+            model_name = "ai4bharat/indictrans2-indic-en-dist-200M" if use_distilled else "ai4bharat/indictrans2-indic-en-1B"
+        elif not src_lang.startswith("eng") and not tgt_lang.startswith("eng"):
+            model_name = "ai4bharat/indictrans2-indic-indic-dist-320M" if use_distilled else "ai4bharat/indictrans2-indic-indic-1B"
+        else:
+            raise ValueError("Invalid language combination: English to English translation is not supported.")
 
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_name,
-                trust_remote_code=True
-            )
-            self.model = AutoModelForSeq2SeqLM.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                torch_dtype=torch.float16,
-                attn_implementation="flash_attention_2"
-            )
-            self.model = self.model.to(self.device_type)
-            self.model = torch.compile(self.model, mode="reduce-overhead")
-            logger.info(f"Translation model {model_name} loaded")
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            attn_implementation="flash_attention_2"
+        ).to(self.device_type)
+        return tokenizer, model
 
 class ModelManager:
     def __init__(self, device_type=device, use_distilled=True, is_lazy_loading=False):
-        self.models = {}
+        self.models: dict[str, TranslateManager] = {}
         self.device_type = device_type
         self.use_distilled = use_distilled
         self.is_lazy_loading = is_lazy_loading
+        # Preload all translation models
+        self.preload_models()
 
-    def load_model(self, src_lang, tgt_lang, key):
-        logger.info(f"Loading translation model for {src_lang} -> {tgt_lang}")
-        translate_manager = TranslateManager(src_lang, tgt_lang, self.device_type, self.use_distilled)
-        translate_manager.load()
-        self.models[key] = translate_manager
-        logger.info(f"Loaded translation model for {key}")
+    def preload_models(self):
+        # Define the core translation pairs to preload
+        translation_pairs = [
+            ('eng_Latn', 'kan_Knda', 'eng_indic'),  # English to Indic
+            ('kan_Knda', 'eng_Latn', 'indic_eng'),  # Indic to English
+            ('kan_Knda', 'hin_Deva', 'indic_indic')  # Indic to Indic
+        ]
+        for src_lang, tgt_lang, key in translation_pairs:
+            logger.info(f"Preloading translation model for {src_lang} -> {tgt_lang}...")
+            self.models[key] = TranslateManager(src_lang, tgt_lang, self.device_type, self.use_distilled)
+            logger.info(f"Translation model for {key} preloaded successfully")
 
-    def get_model(self, src_lang, tgt_lang):
-        key = self._get_model_key(src_lang, tgt_lang)
-        if key not in self.models:
-            if self.is_lazy_loading:
-                self.load_model(src_lang, tgt_lang, key)
-            else:
-                raise ValueError(f"Model for {key} is not preloaded and lazy loading is disabled.")
-        return self.models.get(key)
-
-    def _get_model_key(self, src_lang, tgt_lang):
+    def get_model(self, src_lang, tgt_lang) -> TranslateManager:
         if src_lang.startswith("eng") and not tgt_lang.startswith("eng"):
-            return 'eng_indic'
+            key = 'eng_indic'
         elif not src_lang.startswith("eng") and tgt_lang.startswith("eng"):
-            return 'indic_eng'
+            key = 'indic_eng'
         elif not src_lang.startswith("eng") and not tgt_lang.startswith("eng"):
-            return 'indic_indic'
-        raise ValueError("Invalid language combination")
+            key = 'indic_indic'
+        else:
+            raise ValueError("Invalid language combination: English to English translation is not supported.")
+
+        if key not in self.models:
+            raise ValueError(f"Model for {key} is not preloaded. All models should be preloaded at startup.")
+        return self.models[key]
 
 # ASR Manager
 class ASRModelManager:
@@ -471,6 +503,41 @@ class TranslationResponse(BaseModel):
 def get_translate_manager(src_lang: str, tgt_lang: str) -> TranslateManager:
     return model_manager.get_model(src_lang, tgt_lang)
 
+# Translation Function
+async def perform_internal_translation(sentences: List[str], src_lang: str, tgt_lang: str) -> List[str]:
+    translate_manager = model_manager.get_model(src_lang, tgt_lang)
+    if not sentences:
+        raise HTTPException(status_code=400, detail="Input sentences are required")
+
+    batch = ip.preprocess_batch(sentences, src_lang=src_lang, tgt_lang=tgt_lang)
+    inputs = translate_manager.tokenizer(
+        batch,
+        truncation=True,
+        padding="longest",
+        return_tensors="pt",
+        return_attention_mask=True,
+    ).to(translate_manager.device_type)
+
+    with torch.no_grad():
+        generated_tokens = translate_manager.model.generate(
+            **inputs,
+            use_cache=True,
+            min_length=0,
+            max_length=256,
+            num_beams=5,
+            num_return_sequences=1,
+        )
+
+    with translate_manager.tokenizer.as_target_tokenizer():
+        generated_tokens = translate_manager.tokenizer.batch_decode(
+            generated_tokens.detach().cpu().tolist(),
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True,
+        )
+
+    translations = ip.postprocess_batch(generated_tokens, lang=tgt_lang)
+    return translations
+
 # Lifespan Event Handler
 translation_configs = []
 
@@ -493,23 +560,8 @@ async def lifespan(app: FastAPI):
             asr_manager.load()
             logger.info("ASR model loaded successfully")
 
-            # Load translation models
-            translation_tasks = [
-                ('eng_Latn', 'kan_Knda', 'eng_indic'),
-                ('kan_Knda', 'eng_Latn', 'indic_eng'),
-                ('kan_Knda', 'hin_Deva', 'indic_indic'),
-            ]
-            
-            for config in translation_configs:
-                src_lang = config["src_lang"]
-                tgt_lang = config["tgt_lang"]
-                key = model_manager._get_model_key(src_lang, tgt_lang)
-                translation_tasks.append((src_lang, tgt_lang, key))
-
-            for src_lang, tgt_lang, key in translation_tasks:
-                logger.info(f"Loading translation model for {src_lang} -> {tgt_lang}...")
-                model_manager.load_model(src_lang, tgt_lang, key)
-                logger.info(f"Translation model for {key} loaded successfully")
+            # Translation models are preloaded in ModelManager constructor
+            logger.info("Translation models already preloaded in ModelManager initialization.")
 
             logger.info("All models loaded successfully")
         except Exception as e:
@@ -554,91 +606,10 @@ async def add_request_timing(request: Request, call_next):
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 
-# API Endpoints
-@app.post("/audio/speech", response_class=StreamingResponse)
-async def synthesize_kannada(request: KannadaSynthesizeRequest):
-    if not tts_manager.model:
-        raise HTTPException(status_code=503, detail="TTS model not loaded")
-    kannada_example = next(ex for ex in EXAMPLES if ex["audio_name"] == "KAN_F (Happy)")
-    if not request.text.strip():
-        raise HTTPException(status_code=400, detail="Text to synthesize cannot be empty.")
-    
-    audio_buffer = synthesize_speech(
-        tts_manager,
-        text=request.text,
-        ref_audio_name="KAN_F (Happy)",
-        ref_text=kannada_example["ref_text"]
-    )
-    
-    return StreamingResponse(
-        audio_buffer,
-        media_type="audio/wav",
-        headers={"Content-Disposition": "attachment; filename=synthesized_kannada_speech.wav"}
-    )
+# LLM Router
+llm_router = APIRouter(prefix="/v1", tags=["LLM"])
 
-@app.post("/translate", response_model=TranslationResponse)
-async def translate(request: TranslationRequest, translate_manager: TranslateManager = Depends(get_translate_manager)):
-    input_sentences = request.sentences
-    src_lang = request.src_lang
-    tgt_lang = request.tgt_lang
-
-    if not input_sentences:
-        raise HTTPException(status_code=400, detail="Input sentences are required")
-
-    batch = ip.preprocess_batch(input_sentences, src_lang=src_lang, tgt_lang=tgt_lang)
-    inputs = translate_manager.tokenizer(
-        batch,
-        truncation=True,
-        padding="longest",
-        return_tensors="pt",
-        return_attention_mask=True,
-    ).to(translate_manager.device_type)
-
-    with torch.no_grad():
-        generated_tokens = translate_manager.model.generate(
-            **inputs,
-            use_cache=True,
-            min_length=0,
-            max_length=256,
-            num_beams=5,
-            num_return_sequences=1,
-        )
-
-    with translate_manager.tokenizer.as_target_tokenizer():
-        generated_tokens = translate_manager.tokenizer.batch_decode(
-            generated_tokens.detach().cpu().tolist(),
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=True,
-        )
-
-    translations = ip.postprocess_batch(generated_tokens, lang=tgt_lang)
-    return TranslationResponse(translations=translations)
-
-async def perform_internal_translation(sentences: List[str], src_lang: str, tgt_lang: str) -> List[str]:
-    try:
-        translate_manager = model_manager.get_model(src_lang, tgt_lang)
-    except ValueError as e:
-        logger.info(f"Model not preloaded: {str(e)}, loading now...")
-        key = model_manager._get_model_key(src_lang, tgt_lang)
-        model_manager.load_model(src_lang, tgt_lang, key)
-        translate_manager = model_manager.get_model(src_lang, tgt_lang)
-    
-    if not translate_manager.model:
-        translate_manager.load()
-    
-    request = TranslationRequest(sentences=sentences, src_lang=src_lang, tgt_lang=tgt_lang)
-    response = await translate(request, translate_manager)
-    return response.translations
-
-@app.get("/v1/health")
-async def health_check():
-    return {"status": "healthy", "model": settings.llm_model_name}
-
-@app.get("/")
-async def home():
-    return RedirectResponse(url="/docs")
-
-@app.post("/v1/unload_all_models")
+@llm_router.post("/unload_all_models")
 async def unload_all_models():
     try:
         logger.info("Starting to unload all models...")
@@ -649,7 +620,7 @@ async def unload_all_models():
         logger.error(f"Error unloading models: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to unload models: {str(e)}")
 
-@app.post("/v1/load_all_models")
+@llm_router.post("/load_all_models")
 async def load_all_models():
     try:
         logger.info("Starting to load all models...")
@@ -660,32 +631,14 @@ async def load_all_models():
         logger.error(f"Error loading models: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to load models: {str(e)}")
 
-@app.post("/v1/translate", response_model=TranslationResponse)
-async def translate_endpoint(request: TranslationRequest):
-    logger.info(f"Received translation request: {request.dict()}")
-    try:
-        translations = await perform_internal_translation(
-            sentences=request.sentences,
-            src_lang=request.src_lang,
-            tgt_lang=request.tgt_lang
-        )
-        logger.info(f"Translation successful: {translations}")
-        return TranslationResponse(translations=translations)
-    except Exception as e:
-        logger.error(f"Unexpected error during translation: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
-
-@app.post("/v1/chat", response_model=ChatResponse)
+@llm_router.post("/chat", response_model=ChatResponse)
 @limiter.limit(settings.chat_rate_limit)
 async def chat(request: Request, chat_request: ChatRequest):
     if not chat_request.prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
     logger.info(f"Received prompt: {chat_request.prompt}, src_lang: {chat_request.src_lang}, tgt_lang: {chat_request.tgt_lang}")
-    
-    EUROPEAN_LANGUAGES = {"deu_Latn", "fra_Latn", "nld_Latn", "spa_Latn", "ita_Latn", "por_Latn", "rus_Cyrl", "pol_Latn"}
-    
     try:
-        if chat_request.src_lang != "eng_Latn" and chat_request.src_lang not in EUROPEAN_LANGUAGES:
+        if chat_request.src_lang != "eng_Latn":
             translated_prompt = await perform_internal_translation(
                 sentences=[chat_request.prompt],
                 src_lang=chat_request.src_lang,
@@ -695,12 +648,12 @@ async def chat(request: Request, chat_request: ChatRequest):
             logger.info(f"Translated prompt to English: {prompt_to_process}")
         else:
             prompt_to_process = chat_request.prompt
-            logger.info("Prompt in English or European language, no translation needed")
+            logger.info("Prompt already in English, no translation needed")
 
         response = await llm_manager.generate(prompt_to_process, settings.max_tokens)
-        logger.info(f"Generated response: {response}")
+        logger.info(f"Generated English response: {response}")
 
-        if chat_request.tgt_lang != "eng_Latn" and chat_request.tgt_lang not in EUROPEAN_LANGUAGES:
+        if chat_request.tgt_lang != "eng_Latn":
             translated_response = await perform_internal_translation(
                 sentences=[response],
                 src_lang="eng_Latn",
@@ -710,14 +663,14 @@ async def chat(request: Request, chat_request: ChatRequest):
             logger.info(f"Translated response to {chat_request.tgt_lang}: {final_response}")
         else:
             final_response = response
-            logger.info(f"Response in {chat_request.tgt_lang}, no translation needed")
+            logger.info("Response kept in English, no translation needed")
 
         return ChatResponse(response=final_response)
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
-@app.post("/v1/visual_query/")
+@llm_router.post("/visual_query/")
 async def visual_query(
     file: UploadFile = File(...),
     query: str = Body(...),
@@ -761,7 +714,7 @@ async def visual_query(
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
-@app.post("/v1/chat_v2", response_model=ChatResponse)
+@llm_router.post("/chat_v2", response_model=ChatResponse)
 @limiter.limit(settings.chat_rate_limit)
 async def chat_v2(
     request: Request,
@@ -778,70 +731,129 @@ async def chat_v2(
     logger.info(f"Received prompt: {prompt}, src_lang: {src_lang}, tgt_lang: {tgt_lang}, Image provided: {image is not None}")
 
     try:
+        img = None
         if image:
             image_data = await image.read()
             if not image_data:
                 raise HTTPException(status_code=400, detail="Uploaded image is empty")
             img = Image.open(io.BytesIO(image_data))
 
-            if src_lang != "eng_Latn":
-                translated_prompt = await perform_internal_translation(
-                    sentences=[prompt],
-                    src_lang=src_lang,
-                    tgt_lang="eng_Latn"
-                )
-                prompt_to_process = translated_prompt[0]
-                logger.info(f"Translated prompt to English: {prompt_to_process}")
-            else:
-                prompt_to_process = prompt
-                logger.info("Prompt already in English, no translation needed")
-
-            decoded = await llm_manager.chat_v2(img, prompt_to_process)
-            logger.info(f"Generated English response: {decoded}")
-
-            if tgt_lang != "eng_Latn":
-                translated_response = await perform_internal_translation(
-                    sentences=[decoded],
-                    src_lang="eng_Latn",
-                    tgt_lang=tgt_lang
-                )
-                final_response = translated_response[0]
-                logger.info(f"Translated response to {tgt_lang}: {final_response}")
-            else:
-                final_response = decoded
-                logger.info("Response kept in English, no translation needed")
+        if src_lang != "eng_Latn":
+            translated_prompt = await perform_internal_translation(
+                sentences=[prompt],
+                src_lang=src_lang,
+                tgt_lang="eng_Latn"
+            )
+            prompt_to_process = translated_prompt[0]
+            logger.info(f"Translated prompt to English: {prompt_to_process}")
         else:
-            if src_lang != "eng_Latn":
-                translated_prompt = await perform_internal_translation(
-                    sentences=[prompt],
-                    src_lang=src_lang,
-                    tgt_lang="eng_Latn"
-                )
-                prompt_to_process = translated_prompt[0]
-                logger.info(f"Translated prompt to English: {prompt_to_process}")
-            else:
-                prompt_to_process = prompt
-                logger.info("Prompt already in English, no translation needed")
+            prompt_to_process = prompt
+            logger.info("Prompt already in English, no translation needed")
 
-            decoded = await llm_manager.generate(prompt_to_process, settings.max_tokens)
-            logger.info(f"Generated English response: {decoded}")
+        if img:
+            response = await llm_manager.chat_v2(img, prompt_to_process)
+        else:
+            response = await llm_manager.generate(prompt_to_process, settings.max_tokens)
+        logger.info(f"Generated English response: {response}")
 
-            if tgt_lang != "eng_Latn":
-                translated_response = await perform_internal_translation(
-                    sentences=[decoded],
-                    src_lang="eng_Latn",
-                    tgt_lang=tgt_lang
-                )
-                final_response = translated_response[0]
-                logger.info(f"Translated response to {tgt_lang}: {final_response}")
-            else:
-                final_response = decoded
-                logger.info("Response kept in English, no translation needed")
+        if tgt_lang != "eng_Latn":
+            translated_response = await perform_internal_translation(
+                sentences=[response],
+                src_lang="eng_Latn",
+                tgt_lang=tgt_lang
+            )
+            final_response = translated_response[0]
+            logger.info(f"Translated response to {tgt_lang}: {final_response}")
+        else:
+            final_response = response
+            logger.info("Response kept in English, no translation needed")
 
         return ChatResponse(response=final_response)
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+# Include LLM Router
+app.include_router(llm_router)
+
+# Other API Endpoints
+@app.post("/audio/speech", response_class=StreamingResponse)
+async def synthesize_kannada(request: KannadaSynthesizeRequest):
+    if not tts_manager.model:
+        raise HTTPException(status_code=503, detail="TTS model not loaded")
+    kannada_example = next(ex for ex in EXAMPLES if ex["audio_name"] == "KAN_F (Happy)")
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="Text to synthesize cannot be empty.")
+    
+    audio_buffer = synthesize_speech(
+        tts_manager,
+        text=request.text,
+        ref_audio_name="KAN_F (Happy)",
+        ref_text=kannada_example["ref_text"]
+    )
+    
+    return StreamingResponse(
+        audio_buffer,
+        media_type="audio/wav",
+        headers={"Content-Disposition": "attachment; filename=synthesized_kannada_speech.wav"}
+    )
+
+@app.post("/translate", response_model=TranslationResponse)
+async def translate(request: TranslationRequest, translate_manager: TranslateManager = Depends(get_translate_manager)):
+    if not request.sentences:
+        raise HTTPException(status_code=400, detail="Input sentences are required")
+
+    batch = ip.preprocess_batch(request.sentences, src_lang=request.src_lang, tgt_lang=request.tgt_lang)
+    inputs = translate_manager.tokenizer(
+        batch,
+        truncation=True,
+        padding="longest",
+        return_tensors="pt",
+        return_attention_mask=True,
+    ).to(translate_manager.device_type)
+
+    with torch.no_grad():
+        generated_tokens = translate_manager.model.generate(
+            **inputs,
+            use_cache=True,
+            min_length=0,
+            max_length=256,
+            num_beams=5,
+            num_return_sequences=1,
+        )
+
+    with translate_manager.tokenizer.as_target_tokenizer():
+        generated_tokens = translate_manager.tokenizer.batch_decode(
+            generated_tokens.detach().cpu().tolist(),
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True,
+        )
+
+    translations = ip.postprocess_batch(generated_tokens, lang=request.tgt_lang)
+    return TranslationResponse(translations=translations)
+
+@app.get("/v1/health")
+async def health_check():
+    return {"status": "healthy", "model": settings.llm_model_name}
+
+@app.get("/")
+async def home():
+    return RedirectResponse(url="/docs")
+
+@app.post("/v1/translate", response_model=TranslationResponse)
+async def translate_endpoint(request: TranslationRequest):
+    logger.info(f"Received translation request: {request.dict()}")
+    try:
+        translations = await perform_internal_translation(
+            sentences=request.sentences,
+            src_lang=request.src_lang,
+            tgt_lang=request.tgt_lang
+        )
+        logger.info(f"Translation successful: {translations}")
+        return TranslationResponse(translations=translations)
+    except Exception as e:
+        logger.error(f"Unexpected error during translation: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
 
 @app.post("/transcribe/", response_model=TranscriptionResponse)
 async def transcribe_audio(file: UploadFile = File(...), language: str = Query(..., enum=list(asr_manager.model_language.keys()))):
