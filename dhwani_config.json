@@ -1,0 +1,143 @@
+{
+  "variant": "base",
+  "hardware": "NVIDIA T4",
+  "configs": {
+    "config_one": {
+      "description": "Kannada - Speech to Text",
+      "language": "kannada",
+      "components": {
+        "ASR": {
+          "model": "ai4bharat/indic-conformer-600m-multilingual",
+          "language_code": "kn",
+          "decoding": "rnnt"
+        },
+        "LLM": {
+          "model": "google/gemma-3-4b-it",
+          "max_tokens": 512
+        },
+        "Vision": {
+          "model": "moondream2"
+        },
+        "Translation": [
+          {
+            "type": "eng_indic",
+            "model": "ai4bharat/indictrans2-en-indic-dist-200M",
+            "src_lang": "eng_Latn",
+            "tgt_lang": "kan_Knda"
+          },
+          {
+            "type": "indic_eng",
+            "model": "ai4bharat/indictrans2-indic-en-dist-200M",
+            "src_lang": "kan_Knda",
+            "tgt_lang": "eng_Latn"
+          },
+          {
+            "type": "indic_indic",
+            "model": "ai4bharat/indictrans2-indic-indic-dist-320M",
+            "src_lang": "kan_Knda",
+            "tgt_lang": "hin_Deva"
+          }
+        ],
+        "TTS": null
+      }
+    },
+    "config_two": {
+      "description": "Kannada - Speech to Speech",
+      "language": "kannada",
+      "components": {
+        "ASR": {
+          "model": "ai4bharat/indic-conformer-600m-multilingual",
+          "language_code": "kn",
+          "decoding": "rnnt"
+        },
+        "LLM": {
+          "model": "google/gemma-3-4b-it",
+          "max_tokens": 512
+        },
+        "Vision": {
+          "model": "moondream2"
+        },
+        "Translation": [
+          {
+            "type": "eng_indic",
+            "model": "ai4bharat/indictrans2-en-indic-dist-200M",
+            "src_lang": "eng_Latn",
+            "tgt_lang": "kan_Knda"
+          },
+          {
+            "type": "indic_eng",
+            "model": "ai4bharat/indictrans2-indic-en-dist-200M",
+            "src_lang": "kan_Knda",
+            "tgt_lang": "eng_Latn"
+          },
+          {
+            "type": "indic_indic",
+            "model": "ai4bharat/indictrans2-indic-indic-dist-320M",
+            "src_lang": "kan_Knda",
+            "tgt_lang": "hin_Deva"
+          }
+        ],
+        "TTS": {
+          "model": "ai4bharat/indic-parler-tts",
+          "voice": "default_kannada_voice",
+          "speed": 1.0,
+          "response_format": "mp3"
+        }
+      }
+    },
+    "config_three": {
+      "description": "German - Speech to Text",
+      "language": "german",
+      "components": {
+        "ASR": {
+          "model": "openai/whisper",
+          "language_code": "de",
+          "decoding": "default"
+        },
+        "LLM": {
+          "model": "google/gemma-3-4b-it",
+          "max_tokens": 512
+        },
+        "Vision": {
+          "model": "moondream2"
+        },
+        "Translation": null,
+        "TTS": null
+      }
+    },
+    "config_four": {
+      "description": "German - Speech to Speech",
+      "language": "german",
+      "components": {
+        "ASR": {
+          "model": "openai/whisper",
+          "language_code": "de",
+          "decoding": "default"
+        },
+        "LLM": {
+          "model": "google/gemma-3-4b-it",
+          "max_tokens": 512
+        },
+        "Vision": {
+          "model": "moondream2"
+        },
+        "Translation": null,
+        "TTS": {
+          "model": "parler-tts",
+          "voice": "default_german_voice",
+          "speed": 1.0,
+          "response_format": "mp3"
+        }
+      }
+    }
+  },
+  "global_settings": {
+    "host": "0.0.0.0",
+    "port": 7860,
+    "chat_rate_limit": "100/minute",
+    "speech_rate_limit": "5/minute",
+    "device": "cuda",
+    "dtype": "bfloat16",
+    "lazy_load": false
+  }
+}
