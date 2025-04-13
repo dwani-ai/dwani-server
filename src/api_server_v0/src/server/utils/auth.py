@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     external_audio_proc_url: str = Field(..., env="EXTERNAL_AUDIO_PROC_URL")
     default_admin_username: str = Field("admin", env="DEFAULT_ADMIN_USERNAME")
     default_admin_password: str = Field("admin54321", env="DEFAULT_ADMIN_PASSWORD")
-    database_path: str = DATABASE_PATH  # Add for reference if needed elsewhere
+    database_path: str = DATABASE_PATH
 
     class Config:
         env_file = ".env"
@@ -61,10 +61,12 @@ settings = Settings()
 def seed_initial_data():
     db = SessionLocal()
     try:
-        # Seed test user (non-admin)
-        if not db.query(User).filter_by(username="testuser").first():
-            hashed_password = pwd_context.hash("password123")
-            db.add(User(username="testuser", password=hashed_password, is_admin=False))
+        # Seed test user (non-admin) with a device token-like password
+        test_username = "testuser@example.com"
+        if not db.query(User).filter_by(username=test_username).first():
+            test_device_token = "550e8400-e29b-41d4-a716-446655440000"  # Sample UUID
+            hashed_password = pwd_context.hash(test_device_token)
+            db.add(User(username=test_username, password=hashed_password, is_admin=False))
             db.commit()
         # Seed admin user using environment variables
         admin_username = settings.default_admin_username
@@ -73,7 +75,7 @@ def seed_initial_data():
             hashed_password = pwd_context.hash(admin_password)
             db.add(User(username=admin_username, password=hashed_password, is_admin=True))
             db.commit()
-        logger.info(f"Seeded initial data: admin user '{admin_username}'")
+        logger.info(f"Seeded initial data: test user '{test_username}', admin user '{admin_username}'")
     except Exception as e:
         logger.error(f"Error seeding initial data: {str(e)}")
         db.rollback()
@@ -170,7 +172,7 @@ async def login(login_request: LoginRequest) -> TokenResponse:
     db.close()
     if not user or not pwd_context.verify(login_request.password, user.password):
         logger.warning(f"Login failed for user: {login_request.username}")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or device token")
     tokens = await create_access_token(user_id=user.username)
     return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
 
@@ -190,6 +192,24 @@ async def register(register_request: RegisterRequest, current_user: str = Depend
     
     tokens = await create_access_token(user_id=register_request.username)
     logger.info(f"Registered and generated token for user: {register_request.username} by admin {current_user}")
+    return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
+
+async def app_register(register_request: RegisterRequest) -> TokenResponse:
+    db = SessionLocal()
+    existing_user = db.query(User).filter_by(username=register_request.username).first()
+    if existing_user:
+        db.close()
+        logger.warning(f"App registration failed: Email {register_request.username} already exists")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
+    
+    hashed_password = pwd_context.hash(register_request.password)
+    new_user = User(username=register_request.username, password=hashed_password, is_admin=False)
+    db.add(new_user)
+    db.commit()
+    db.close()
+    
+    tokens = await create_access_token(user_id=register_request.username)
+    logger.info(f"App registered new user: {register_request.username}")
     return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
 
 async def refresh_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> TokenResponse:

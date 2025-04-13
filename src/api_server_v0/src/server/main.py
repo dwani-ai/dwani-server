@@ -16,7 +16,7 @@ import requests
 from PIL import Image
 
 # Import from auth.py
-from utils.auth import get_current_user, get_current_user_with_admin, login, refresh_token, register, TokenResponse, Settings, LoginRequest, RegisterRequest, bearer_scheme
+from utils.auth import get_current_user, get_current_user_with_admin, login, refresh_token, register, app_register, TokenResponse, Settings, LoginRequest, RegisterRequest, bearer_scheme
 
 # Assuming these are in your project structure
 from config.tts_config import SPEED, ResponseFormat, config as tts_config
@@ -178,8 +178,8 @@ async def refresh(credentials: HTTPAuthorizationCredentials = Depends(bearer_sch
 
 @app.post("/v1/register", 
           response_model=TokenResponse,
-          summary="Register New User",
-          description="Create a new user account and return an access token and refresh token. Requires admin access (use 'admin' user with password 'adminpass' initially).",
+          summary="Register New User (Admin)",
+          description="Create a new user account and return an access token and refresh token. Requires admin access (use 'admin' user with password 'admin54321' initially).",
           tags=["Authentication"],
           responses={
               200: {"description": "User registered successfully", "model": TokenResponse},
@@ -191,6 +191,24 @@ async def register_user(
     current_user: str = Depends(get_current_user_with_admin)
 ):
     return await register(register_request, current_user)
+
+@app.post("/v1/app/register",
+          response_model=TokenResponse,
+          summary="Register New App User",
+          description="Create a new user account for the mobile app using an email and device token. Returns an access token and refresh token. Rate limited to 5 requests per minute per IP.",
+          tags=["Authentication"],
+          responses={
+              200: {"description": "User registered successfully", "model": TokenResponse},
+              400: {"description": "Email already registered"},
+              429: {"description": "Rate limit exceeded"}
+          })
+@limiter.limit(settings.speech_rate_limit)
+async def app_register_user(
+    request: Request,
+    register_request: RegisterRequest
+):
+    logger.info(f"App registration attempt for email: {register_request.username}")
+    return await app_register(register_request)
 
 @app.post("/v1/audio/speech",
           summary="Generate Speech from Text",
@@ -649,7 +667,7 @@ async def speech_to_speech(
     user_id = await get_current_user(credentials)
     logger.info("Processing speech-to-speech request", extra={
         "endpoint": "/v1/speech_to_speech",
-        "audio_filename": file.filename,  # Changed from 'filename' to avoid KeyError
+        "audio_filename": file.filename,
         "language": language,
         "client_ip": get_remote_address(request),
         "user_id": user_id
