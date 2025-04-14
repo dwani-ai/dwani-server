@@ -10,6 +10,9 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from passlib.context import CryptContext
 import os
+import base64
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
 
 # SQLite database setup with Hugging Face persistent storage
 DATABASE_PATH = "/data/users.db"
@@ -18,11 +21,20 @@ engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 Base = declarative_base()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+# Model for admin-related users
 class User(Base):
     __tablename__ = "users"
     username = Column(String, primary_key=True, index=True)
     password = Column(String)  # Stores hashed passwords
-    is_admin = Column(Boolean, default=False)  # New admin flag
+    is_admin = Column(Boolean, default=False)
+    session_key = Column(String, nullable=True)  # Stores base64-encoded session key
+
+# Model for app users
+class AppUser(Base):
+    __tablename__ = "app_users"
+    username = Column(String, primary_key=True, index=True)
+    password = Column(String)  # Stores hashed passwords
+    session_key = Column(String, nullable=True)  # Stores base64-encoded session key
 
 # Ensure the /data directory exists
 os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
@@ -35,8 +47,8 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 class Settings(BaseSettings):
     api_key_secret: str = Field(..., env="API_KEY_SECRET")
-    token_expiration_minutes: int = Field(1440, env="TOKEN_EXPIRATION_MINUTES")  # 24 hours
-    refresh_token_expiration_days: int = Field(7, env="REFRESH_TOKEN_EXPIRATION_DAYS")  # 7 days
+    token_expiration_minutes: int = Field(1440, env="TOKEN_EXPIRATION_MINUTES")
+    refresh_token_expiration_days: int = Field(7, env="REFRESH_TOKEN_EXPIRATION_DAYS")
     llm_model_name: str = "google/gemma-3-4b-it"
     max_tokens: int = 512
     host: str = "0.0.0.0"
@@ -57,23 +69,23 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Seed initial data
+# Seed initial data for users table only
 def seed_initial_data():
     db = SessionLocal()
     try:
-        # Seed test user (non-admin) with a device token-like password
         test_username = "testuser@example.com"
         if not db.query(User).filter_by(username=test_username).first():
-            test_device_token = "550e8400-e29b-41d4-a716-446655440000"  # Sample UUID
+            test_device_token = "550e8400-e29b-41d4-a716-446655440000"
             hashed_password = pwd_context.hash(test_device_token)
-            db.add(User(username=test_username, password=hashed_password, is_admin=False))
+            session_key = base64.b64encode(get_random_bytes(16)).decode('utf-8')
+            db.add(User(username=test_username, password=hashed_password, is_admin=False, session_key=session_key))
             db.commit()
-        # Seed admin user using environment variables
         admin_username = settings.default_admin_username
         admin_password = settings.default_admin_password
         if not db.query(User).filter_by(username=admin_username).first():
             hashed_password = pwd_context.hash(admin_password)
-            db.add(User(username=admin_username, password=hashed_password, is_admin=True))
+            session_key = base64.b64encode(get_random_bytes(16)).decode('utf-8')
+            db.add(User(username=admin_username, password=hashed_password, is_admin=True, session_key=session_key))
             db.commit()
         logger.info(f"Seeded initial data: test user '{test_username}', admin user '{admin_username}'")
     except Exception as e:
@@ -82,10 +94,8 @@ def seed_initial_data():
     finally:
         db.close()
 
-# Initialize database with seed data
 seed_initial_data()
 
-# Use HTTPBearer
 bearer_scheme = HTTPBearer()
 
 class TokenPayload(BaseModel):
@@ -105,6 +115,17 @@ class LoginRequest(BaseModel):
 class RegisterRequest(BaseModel):
     username: str
     password: str
+
+def decrypt_data(encrypted_data: str, key: bytes) -> str:
+    try:
+        data = base64.b64decode(encrypted_data)
+        nonce, ciphertext = data[:12], data[12:]
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+        plaintext = cipher.decrypt_and_verify(ciphertext[:-16], ciphertext[-16:])
+        return plaintext.decode('utf-8')
+    except Exception as e:
+        logger.error(f"Decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted data")
 
 async def create_access_token(user_id: str) -> dict:
     expire = datetime.utcnow() + timedelta(minutes=settings.token_expiration_minutes)
@@ -129,9 +150,11 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
         user_id = token_data.sub
         
         db = SessionLocal()
+        # Check both users and app_users tables
         user = db.query(User).filter_by(username=user_id).first()
+        app_user = db.query(AppUser).filter_by(username=user_id).first()
         db.close()
-        if user_id is None or not user:
+        if user_id is None or (not user and not app_user):
             logger.warning(f"Invalid or unknown user: {user_id}")
             raise credentials_exception
         
@@ -157,59 +180,124 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
         raise credentials_exception
 
 async def get_current_user_with_admin(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
-    user_id = await get_current_user(credentials)
-    db = SessionLocal()
-    user = db.query(User).filter_by(username=user_id).first()
-    db.close()
-    if not user or not user.is_admin:
-        logger.warning(f"User {user_id} is not authorized as admin")
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
-    return user_id
+    token = credentials.credentials
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid authentication credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, settings.api_key_secret, algorithms=["HS256"])
+        token_data = TokenPayload(**payload)
+        user_id = token_data.sub
+        
+        db = SessionLocal()
+        user = db.query(User).filter_by(username=user_id).first()
+        db.close()
+        if not user:
+            logger.warning(f"User not found in users table: {user_id}")
+            raise credentials_exception
+        if not user.is_admin:
+            logger.warning(f"User {user_id} is not authorized as admin")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin access required; only admin accounts can perform this action"
+            )
+        
+        logger.info(f"Validated admin user: {user_id}")
+        return user_id
+    except jwt.InvalidSignatureError as e:
+        logger.error(f"Invalid signature error: {str(e)}")
+        raise credentials_exception
+    except jwt.InvalidTokenError as e:
+        logger.error(f"Other token error: {str(e)}")
+        raise credentials_exception
+    except Exception as e:
+        logger.error(f"Unexpected admin validation error: {str(e)}")
+        raise credentials_exception
 
-async def login(login_request: LoginRequest) -> TokenResponse:
+async def login(login_request: LoginRequest, session_key_b64: str) -> TokenResponse:
     db = SessionLocal()
-    user = db.query(User).filter_by(username=login_request.username).first()
-    db.close()
-    if not user or not pwd_context.verify(login_request.password, user.password):
-        logger.warning(f"Login failed for user: {login_request.username}")
+    session_key = base64.b64decode(session_key_b64)
+    try:
+        username = decrypt_data(login_request.username, session_key)
+        password = decrypt_data(login_request.password, session_key)
+    except:
+        db.close()
+        raise HTTPException(status_code=400, detail="Invalid encrypted data")
+    
+    # Check both users and app_users tables
+    user = db.query(User).filter_by(username=username).first()
+    app_user = db.query(AppUser).filter_by(username=username).first()
+    
+    if not user and not app_user:
+        db.close()
+        logger.warning(f"Login failed for user: {username}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or device token")
-    tokens = await create_access_token(user_id=user.username)
+    
+    target_user = user if user else app_user
+    if not pwd_context.verify(password, target_user.password):
+        db.close()
+        logger.warning(f"Login failed for user: {username}")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or device token")
+    
+    if target_user.session_key != session_key_b64:
+        target_user.session_key = session_key_b64
+        db.commit()
+    db.close()
+    
+    tokens = await create_access_token(user_id=username)
     return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
 
 async def register(register_request: RegisterRequest, current_user: str = Depends(get_current_user_with_admin)) -> TokenResponse:
     db = SessionLocal()
-    existing_user = db.query(User).filter_by(username=register_request.username).first()
-    if existing_user:
+    try:
+        existing_user = db.query(User).filter_by(username=register_request.username).first()
+        if existing_user:
+            logger.warning(f"Registration failed: Username {register_request.username} already exists")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already exists")
+        
+        hashed_password = pwd_context.hash(register_request.password)
+        new_user = User(username=register_request.username, password=hashed_password, is_admin=False)
+        db.add(new_user)
+        db.commit()
+        logger.info(f"Admin {current_user} successfully registered new user: {register_request.username}")
+        
+        tokens = await create_access_token(user_id=register_request.username)
+        return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Registration error by admin {current_user}: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Registration failed: {str(e)}")
+    finally:
         db.close()
-        logger.warning(f"Registration failed: Username {register_request.username} already exists")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already exists")
-    
-    hashed_password = pwd_context.hash(register_request.password)
-    new_user = User(username=register_request.username, password=hashed_password, is_admin=False)
-    db.add(new_user)
-    db.commit()
-    db.close()
-    
-    tokens = await create_access_token(user_id=register_request.username)
-    logger.info(f"Registered and generated token for user: {register_request.username} by admin {current_user}")
-    return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
 
-async def app_register(register_request: RegisterRequest) -> TokenResponse:
+async def app_register(register_request: RegisterRequest, session_key_b64: str) -> TokenResponse:
     db = SessionLocal()
-    existing_user = db.query(User).filter_by(username=register_request.username).first()
-    if existing_user:
+    session_key = base64.b64decode(session_key_b64)
+    try:
+        username = decrypt_data(register_request.username, session_key)
+        password = decrypt_data(register_request.password, session_key)
+    except:
         db.close()
-        logger.warning(f"App registration failed: Email {register_request.username} already exists")
+        raise HTTPException(status_code=400, detail="Invalid encrypted data")
+    
+    # Check both tables to prevent duplicate usernames
+    existing_user = db.query(User).filter_by(username=username).first()
+    existing_app_user = db.query(AppUser).filter_by(username=username).first()
+    if existing_user or existing_app_user:
+        db.close()
+        logger.warning(f"App registration failed: Email {username} already exists")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
     
-    hashed_password = pwd_context.hash(register_request.password)
-    new_user = User(username=register_request.username, password=hashed_password, is_admin=False)
-    db.add(new_user)
+    hashed_password = pwd_context.hash(password)
+    new_app_user = AppUser(username=username, password=hashed_password, session_key=session_key_b64)
+    db.add(new_app_user)
     db.commit()
     db.close()
     
-    tokens = await create_access_token(user_id=register_request.username)
-    logger.info(f"App registered new user: {register_request.username}")
+    tokens = await create_access_token(user_id=username)
+    logger.info(f"App registered new user: {username}")
     return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
 
 async def refresh_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> TokenResponse:
@@ -221,12 +309,12 @@ async def refresh_token(credentials: HTTPAuthorizationCredentials = Depends(bear
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type; refresh token required")
         user_id = token_data.sub
         db = SessionLocal()
+        # Check both users and app_users tables
         user = db.query(User).filter_by(username=user_id).first()
+        app_user = db.query(AppUser).filter_by(username=user_id).first()
         db.close()
-        if not user:
+        if not user and not app_user:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-        if datetime.utcnow().timestamp() > token_data.exp:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token has expired")
         tokens = await create_access_token(user_id=user_id)
         return TokenResponse(access_token=tokens["access_token"], refresh_token=tokens["refresh_token"], token_type="bearer")
     except jwt.InvalidTokenError:

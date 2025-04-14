@@ -5,7 +5,7 @@ from typing import List, Optional
 from abc import ABC, abstractmethod
 
 import uvicorn
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Form
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Header, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -14,9 +14,14 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 import requests
 from PIL import Image
+import base64
+from Crypto.Cipher import AES
 
 # Import from auth.py
 from utils.auth import get_current_user, get_current_user_with_admin, login, refresh_token, register, app_register, TokenResponse, Settings, LoginRequest, RegisterRequest, bearer_scheme
+
+# Import decryption utility
+from utils.crypto import decrypt_data
 
 # Assuming these are in your project structure
 from config.tts_config import SPEED, ResponseFormat, config as tts_config
@@ -58,42 +63,11 @@ async def get_user_id_for_rate_limit(request: Request):
         user_id = await get_current_user(credentials)
         return user_id
     except Exception:
-        return get_remote_address(request)  # Fallback to IP if unauthenticated
+        return get_remote_address(request)
 
 limiter = Limiter(key_func=get_user_id_for_rate_limit)
 
 # Request/Response Models
-class SpeechRequest(BaseModel):
-    input: str = Field(..., description="Text to convert to speech (max 1000 characters)")
-    voice: str = Field(..., description="Voice identifier for the TTS service")
-    model: str = Field(..., description="TTS model to use")
-    response_format: ResponseFormat = Field(tts_config.response_format, description="Audio format: mp3, flac, or wav")
-    speed: float = Field(SPEED, description="Speech speed (default: 1.0)")
-
-    @field_validator("input")
-    def input_must_be_valid(cls, v):
-        if len(v) > 1000:
-            raise ValueError("Input cannot exceed 1000 characters")
-        return v.strip()
-
-    @field_validator("response_format")
-    def validate_response_format(cls, v):
-        supported_formats = [ResponseFormat.MP3, ResponseFormat.FLAC, ResponseFormat.WAV]
-        if v not in supported_formats:
-            raise ValueError(f"Response format must be one of {[fmt.value for fmt in supported_formats]}")
-        return v
-
-    class Config:
-        schema_extra = {
-            "example": {
-                "input": "Hello, how are you?",
-                "voice": "female-1",
-                "model": "tts-model-1",
-                "response_format": "mp3",
-                "speed": 1.0
-            }
-        }
-
 class TranscriptionResponse(BaseModel):
     text: str = Field(..., description="Transcribed text from the audio")
 
@@ -112,6 +86,94 @@ class AudioProcessingResponse(BaseModel):
     class Config:
         schema_extra = {"example": {"result": "Processed audio output"}} 
 
+class ChatRequest(BaseModel):
+    prompt: str = Field(..., description="Base64-encoded encrypted prompt (max 1000 characters after decryption)")
+    src_lang: str = Field(..., description="Base64-encoded encrypted source language code")
+    tgt_lang: str = Field(..., description="Base64-encoded encrypted target language code")
+
+    @field_validator("prompt", "src_lang", "tgt_lang")
+    def must_be_valid_base64(cls, v):
+        try:
+            base64.b64decode(v)
+        except Exception:
+            raise ValueError("Field must be valid base64-encoded data")
+        return v
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "prompt": "base64_encoded_encrypted_prompt",
+                "src_lang": "base64_encoded_encrypted_kan_Knda",
+                "tgt_lang": "base64_encoded_encrypted_kan_Knda"
+            }
+        }
+
+class ChatResponse(BaseModel):
+    response: str = Field(..., description="Generated chat response")
+
+    class Config:
+        schema_extra = {"example": {"response": "Hi there, I'm doing great!"}} 
+
+class TranslationRequest(BaseModel):
+    sentences: List[str] = Field(..., description="List of base64-encoded encrypted sentences")
+    src_lang: str = Field(..., description="Base64-encoded encrypted source language code")
+    tgt_lang: str = Field(..., description="Base64-encoded encrypted target language code")
+
+    @field_validator("sentences", "src_lang", "tgt_lang")
+    def must_be_valid_base64(cls, v):
+        if isinstance(v, list):
+            for item in v:
+                try:
+                    base64.b64decode(item)
+                except Exception:
+                    raise ValueError("Each sentence must be valid base64-encoded data")
+        else:
+            try:
+                base64.b64decode(v)
+            except Exception:
+                raise ValueError("Field must be valid base64-encoded data")
+        return v
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "sentences": ["base64_encoded_encrypted_hello", "base64_encoded_encrypted_how_are_you"],
+                "src_lang": "base64_encoded_encrypted_en",
+                "tgt_lang": "base64_encoded_encrypted_kan_Knda"
+            }
+        }
+
+class TranslationResponse(BaseModel):
+    translations: List[str] = Field(..., description="Translated sentences")
+
+    class Config:
+        schema_extra = {"example": {"translations": ["ನಮಸ್ಕಾರ", "ನೀವು ಹೇಗಿದ್ದೀರಿ?"]}} 
+
+class VisualQueryRequest(BaseModel):
+    query: str = Field(..., description="Base64-encoded encrypted text query")
+    src_lang: str = Field(..., description="Base64-encoded encrypted source language code")
+    tgt_lang: str = Field(..., description="Base64-encoded encrypted target language code")
+
+    @field_validator("query", "src_lang", "tgt_lang")
+    def must_be_valid_base64(cls, v):
+        try:
+            base64.b64decode(v)
+        except Exception:
+            raise ValueError("Field must be valid base64-encoded data")
+        return v
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "query": "base64_encoded_encrypted_describe_image",
+                "src_lang": "base64_encoded_encrypted_kan_Knda",
+                "tgt_lang": "base64_encoded_encrypted_kan_Knda"
+            }
+        }
+
+class VisualQueryResponse(BaseModel):
+    answer: str
+
 # TTS Service Interface
 class TTSService(ABC):
     @abstractmethod
@@ -124,14 +186,16 @@ class ExternalTTSService(TTSService):
             return requests.post(
                 settings.external_tts_url,
                 json=payload,
-                headers={"accept": "application/json", "Content-Type": "application/json"},
+                headers={"accept": "*/*", "Content-Type": "application/json"},
                 stream=True,
                 timeout=60
             )
         except requests.Timeout:
+            logger.error("External TTS API timeout")
             raise HTTPException(status_code=504, detail="External TTS API timeout")
         except requests.RequestException as e:
-            raise HTTPException(status_code=500, detail=f"External TTS API error: {str(e)}")
+            logger.error(f"External TTS API error: {str(e)}")
+            raise HTTPException(status_code=502, detail=f"External TTS service error: {str(e)}")
 
 def get_tts_service() -> TTSService:
     return ExternalTTSService()
@@ -155,14 +219,18 @@ async def home():
 @app.post("/v1/token", 
           response_model=TokenResponse,
           summary="User Login",
-          description="Authenticate a user with username and password to obtain an access token and refresh token. Copy the access token and use it in the 'Authorize' button above.",
+          description="Authenticate a user with encrypted email and device token to obtain an access token and refresh token. Requires X-Session-Key header.",
           tags=["Authentication"],
           responses={
               200: {"description": "Successful login", "model": TokenResponse},
-              401: {"description": "Invalid username or password"}
+              400: {"description": "Invalid encrypted data"},
+              401: {"description": "Invalid email or device token"}
           })
-async def token(login_request: LoginRequest):
-    return await login(login_request)
+async def token(
+    login_request: LoginRequest,
+    x_session_key: str = Header(..., alias="X-Session-Key")
+):
+    return await login(login_request, x_session_key)
 
 @app.post("/v1/refresh", 
           response_model=TokenResponse,
@@ -178,13 +246,15 @@ async def refresh(credentials: HTTPAuthorizationCredentials = Depends(bearer_sch
 
 @app.post("/v1/register", 
           response_model=TokenResponse,
-          summary="Register New User (Admin)",
-          description="Create a new user account and return an access token and refresh token. Requires admin access (use 'admin' user with password 'admin54321' initially).",
+          summary="Register New User (Admin Only)",
+          description="Create a new user account in the `users` table. Only admin accounts can register new users (use 'admin' user with password 'admin54321' initially). Non-admin users are forbidden from modifying the users table.",
           tags=["Authentication"],
           responses={
               200: {"description": "User registered successfully", "model": TokenResponse},
               400: {"description": "Username already exists"},
-              403: {"description": "Admin access required"}
+              401: {"description": "Unauthorized - Valid admin token required"},
+              403: {"description": "Forbidden - Admin access required"},
+              500: {"description": "Registration failed due to server error"}
           })
 async def register_user(
     register_request: RegisterRequest,
@@ -195,105 +265,97 @@ async def register_user(
 @app.post("/v1/app/register",
           response_model=TokenResponse,
           summary="Register New App User",
-          description="Create a new user account for the mobile app using an email and device token. Returns an access token and refresh token. Rate limited to 5 requests per minute per IP.",
+          description="Create a new user account for the mobile app in the `app_users` table using an encrypted email and device token. Returns an access token and refresh token. Rate limited to 5 requests per minute per IP. Requires X-Session-Key header.",
           tags=["Authentication"],
           responses={
               200: {"description": "User registered successfully", "model": TokenResponse},
-              400: {"description": "Email already registered"},
+              400: {"description": "Email already registered or invalid encrypted data"},
               429: {"description": "Rate limit exceeded"}
           })
 @limiter.limit(settings.speech_rate_limit)
 async def app_register_user(
     request: Request,
-    register_request: RegisterRequest
+    register_request: RegisterRequest,
+    x_session_key: str = Header(..., alias="X-Session-Key")
 ):
-    logger.info(f"App registration attempt for email: {register_request.username}")
-    return await app_register(register_request)
+    logger.info(f"App registration attempt")
+    return await app_register(register_request, x_session_key)
 
 @app.post("/v1/audio/speech",
           summary="Generate Speech from Text",
-          description="Convert text to speech in the specified format using an external TTS service. Rate limited to 5 requests per minute per user. Requires authentication.",
+          description="Convert encrypted text to speech using an external TTS service. Rate limited to 5 requests per minute per user. Requires authentication and X-Session-Key header.",
           tags=["Audio"],
           responses={
               200: {"description": "Audio stream", "content": {"audio/mp3": {"example": "Binary audio data"}}},
-              400: {"description": "Invalid input"},
+              400: {"description": "Invalid or empty input"},
               401: {"description": "Unauthorized - Token required"},
               429: {"description": "Rate limit exceeded"},
+              502: {"description": "External TTS service unavailable"},
               504: {"description": "TTS service timeout"}
           })
 @limiter.limit(settings.speech_rate_limit)
 async def generate_audio(
     request: Request,
-    speech_request: SpeechRequest = Depends(),
+    input: str = Query(..., description="Base64-encoded encrypted text to convert to speech (max 1000 characters after decryption)"),
+    response_format: str = Query("mp3", description="Audio format (ignored, defaults to mp3 for external API)"),
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    x_session_key: str = Header(..., alias="X-Session-Key"),
     tts_service: TTSService = Depends(get_tts_service)
 ):
     user_id = await get_current_user(credentials)
-    if not speech_request.input.strip():
+    session_key = base64.b64decode(x_session_key)
+    
+    # Decrypt input
+    try:
+        encrypted_input = base64.b64decode(input)
+        decrypted_input = decrypt_data(encrypted_input, session_key).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Input decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted input")
+    
+    if not decrypted_input.strip():
         raise HTTPException(status_code=400, detail="Input cannot be empty")
+    if len(decrypted_input) > 1000:
+        raise HTTPException(status_code=400, detail="Decrypted input cannot exceed 1000 characters")
     
     logger.info("Processing speech request", extra={
         "endpoint": "/v1/audio/speech",
-        "input_length": len(speech_request.input),
+        "input_length": len(decrypted_input),
         "client_ip": get_remote_address(request),
         "user_id": user_id
     })
     
     payload = {
-        "input": speech_request.input,
-        "voice": speech_request.voice,
-        "model": speech_request.model,
-        "response_format": speech_request.response_format.value,
-        "speed": speech_request.speed
+        "text": decrypted_input
     }
     
-    response = await tts_service.generate_speech(payload)
-    response.raise_for_status()
+    try:
+        response = await tts_service.generate_speech(payload)
+        response.raise_for_status()
+    except requests.HTTPError as e:
+        logger.error(f"External TTS request failed: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"External TTS service error: {str(e)}")
     
     headers = {
-        "Content-Disposition": f"inline; filename=\"speech.{speech_request.response_format.value}\"",
+        "Content-Disposition": "inline; filename=\"speech.mp3\"",
         "Cache-Control": "no-cache",
-        "Content-Type": f"audio/{speech_request.response_format.value}"
+        "Content-Type": "audio/mp3"
     }
     
     return StreamingResponse(
         response.iter_content(chunk_size=8192),
-        media_type=f"audio/{speech_request.response_format.value}",
+        media_type="audio/mp3",
         headers=headers
     )
-
-class ChatRequest(BaseModel):
-    prompt: str = Field(..., description="Text prompt for chat (max 1000 characters)")
-    src_lang: str = Field("kan_Knda", description="Source language code (default: Kannada)")
-
-    @field_validator("prompt")
-    def prompt_must_be_valid(cls, v):
-        if len(v) > 1000:
-            raise ValueError("Prompt cannot exceed 1000 characters")
-        return v.strip()
-
-    class Config:
-        schema_extra = {
-            "example": {
-                "prompt": "Hello, how are you?",
-                "src_lang": "kan_Knda"
-            }
-        }
-
-class ChatResponse(BaseModel):
-    response: str = Field(..., description="Generated chat response")
-
-    class Config:
-        schema_extra = {"example": {"response": "Hi there, I'm doing great!"}} 
 
 @app.post("/v1/chat", 
           response_model=ChatResponse,
           summary="Chat with AI",
-          description="Generate a chat response from a prompt in the specified language. Rate limited to 100 requests per minute per user. Requires authentication.",
+          description="Generate a chat response from an encrypted prompt and encrypted language code. Rate limited to 100 requests per minute per user. Requires authentication and X-Session-Key header.",
           tags=["Chat"],
           responses={
               200: {"description": "Chat response", "model": ChatResponse},
-              400: {"description": "Invalid prompt"},
+              400: {"description": "Invalid prompt, encrypted data, or language code"},
               401: {"description": "Unauthorized - Token required"},
               429: {"description": "Rate limit exceeded"},
               504: {"description": "Chat service timeout"}
@@ -302,19 +364,49 @@ class ChatResponse(BaseModel):
 async def chat(
     request: Request,
     chat_request: ChatRequest,
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    x_session_key: str = Header(..., alias="X-Session-Key")
 ):
     user_id = await get_current_user(credentials)
-    if not chat_request.prompt:
+    session_key = base64.b64decode(x_session_key)
+    
+    # Decrypt the prompt
+    try:
+        encrypted_prompt = base64.b64decode(chat_request.prompt)
+        decrypted_prompt = decrypt_data(encrypted_prompt, session_key).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Prompt decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted prompt")
+    
+    # Decrypt the source language
+    try:
+        encrypted_src_lang = base64.b64decode(chat_request.src_lang)
+        decrypted_src_lang = decrypt_data(encrypted_src_lang, session_key).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Source language decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted source language")
+    
+    # Decrypt the target language
+    try:
+        encrypted_tgt_lang = base64.b64decode(chat_request.tgt_lang)
+        decrypted_tgt_lang = decrypt_data(encrypted_tgt_lang, session_key).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Target language decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted target language")
+    
+    if not decrypted_prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
-    logger.info(f"Received prompt: {chat_request.prompt}, src_lang: {chat_request.src_lang}, user_id: {user_id}")
+    if len(decrypted_prompt) > 1000:
+        raise HTTPException(status_code=400, detail="Decrypted prompt cannot exceed 1000 characters")
+    
+    logger.info(f"Received prompt: {decrypted_prompt}, src_lang: {decrypted_src_lang}, user_id: {user_id}")
     
     try:
         external_url = "https://slabstech-dhwani-internal-api-server.hf.space/v1/chat"
         payload = {
-            "prompt": chat_request.prompt,
-            "src_lang": chat_request.src_lang,
-            "tgt_lang": chat_request.src_lang
+            "prompt": decrypted_prompt,
+            "src_lang": decrypted_src_lang,
+            "tgt_lang": decrypted_tgt_lang
         }
         
         response = requests.post(
@@ -358,13 +450,30 @@ async def chat(
 async def process_audio(
     request: Request,
     file: UploadFile = File(..., description="Audio file to process"),
-    language: str = Query(..., enum=["kannada", "hindi", "tamil"], description="Language of the audio"),
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+    language: str = Query(..., description="Base64-encoded encrypted language of the audio (kannada, hindi, tamil after decryption)"),
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    x_session_key: str = Header(..., alias="X-Session-Key")
 ):
     user_id = await get_current_user(credentials)
+    session_key = base64.b64decode(x_session_key)
+    
+    # Decrypt the language
+    try:
+        encrypted_language = base64.b64decode(language)
+        decrypted_language = decrypt_data(encrypted_language, session_key).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Language decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted language")
+    
+    # Validate language
+    allowed_languages = ["kannada", "hindi", "tamil"]
+    if decrypted_language not in allowed_languages:
+        raise HTTPException(status_code=400, detail=f"Language must be one of {allowed_languages}")
+    
     logger.info("Processing audio processing request", extra={
         "endpoint": "/v1/process_audio",
         "filename": file.filename,
+        "language": decrypted_language,
         "client_ip": get_remote_address(request),
         "user_id": user_id
     })
@@ -374,7 +483,7 @@ async def process_audio(
         file_content = await file.read()
         files = {"file": (file.filename, file_content, file.content_type)}
         
-        external_url = f"{settings.external_audio_proc_url}/process_audio/?language={language}"
+        external_url = f"{settings.external_audio_proc_url}/process_audio/?language={decrypted_language}"
         response = requests.post(
             external_url,
             files=files,
@@ -396,25 +505,43 @@ async def process_audio(
 @app.post("/v1/transcribe/", 
           response_model=TranscriptionResponse,
           summary="Transcribe Audio File",
-          description="Transcribe an uploaded audio file into text in the specified language. Requires authentication.",
+          description="Transcribe an encrypted audio file into text in the specified encrypted language. Requires authentication and X-Session-Key header.",
           tags=["Audio"],
           responses={
               200: {"description": "Transcription result", "model": TranscriptionResponse},
+              400: {"description": "Invalid encrypted audio or language"},
               401: {"description": "Unauthorized - Token required"},
               504: {"description": "Transcription service timeout"}
           })
 async def transcribe_audio(
-    file: UploadFile = File(..., description="Audio file to transcribe"),
-    language: str = Query(..., enum=["kannada", "hindi", "tamil"], description="Language of the audio"),
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+    file: UploadFile = File(..., description="Encrypted audio file to transcribe"),
+    language: str = Query(..., description="Base64-encoded encrypted language of the audio (kannada, hindi, tamil after decryption)"),
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    x_session_key: str = Header(..., alias="X-Session-Key")
 ):
     user_id = await get_current_user(credentials)
+    session_key = base64.b64decode(x_session_key)
+    
+    # Decrypt the language
+    try:
+        encrypted_language = base64.b64decode(language)
+        decrypted_language = decrypt_data(encrypted_language, session_key).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Language decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted language")
+    
+    # Validate language
+    allowed_languages = ["kannada", "hindi", "tamil"]
+    if decrypted_language not in allowed_languages:
+        raise HTTPException(status_code=400, detail=f"Language must be one of {allowed_languages}")
+    
     start_time = time()
     try:
-        file_content = await file.read()
+        encrypted_content = await file.read()
+        file_content = decrypt_data(encrypted_content, session_key)
         files = {"file": (file.filename, file_content, file.content_type)}
         
-        external_url = f"{settings.external_asr_url}/transcribe/?language={language}"
+        external_url = f"{settings.external_asr_url}/transcribe/?language={decrypted_language}"
         response = requests.post(
             external_url,
             files=files,
@@ -427,7 +554,10 @@ async def transcribe_audio(
         logger.info(f"Transcription completed in {time() - start_time:.2f} seconds")
         return TranscriptionResponse(text=transcription)
     
+    except HTTPException:
+        raise
     except requests.Timeout:
+        logger.error("Transcription service timed out")
         raise HTTPException(status_code=504, detail="Transcription service timeout")
     except requests.RequestException as e:
         logger.error(f"Transcription request failed: {str(e)}")
@@ -471,50 +601,61 @@ async def chat_v2(
         logger.error(f"Chat_v2 processing failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
-class TranslationRequest(BaseModel):
-    sentences: List[str] = Field(..., description="List of sentences to translate")
-    src_lang: str = Field(..., description="Source language code")
-    tgt_lang: str = Field(..., description="Target language code")
-
-    class Config:
-        schema_extra = {
-            "example": {
-                "sentences": ["Hello", "How are you?"],
-                "src_lang": "en",
-                "tgt_lang": "kan_Knda"
-            }
-        }
-
-class TranslationResponse(BaseModel):
-    translations: List[str] = Field(..., description="Translated sentences")
-
-    class Config:
-        schema_extra = {"example": {"translations": ["ನಮಸ್ಕಾರ", "ನೀವು ಹೇಗಿದ್ದೀರಿ?"]}} 
-
 @app.post("/v1/translate", 
           response_model=TranslationResponse,
           summary="Translate Text",
-          description="Translate a list of sentences from source to target language. Requires authentication.",
+          description="Translate a list of base64-encoded encrypted sentences from an encrypted source to an encrypted target language. Requires authentication and X-Session-Key header.",
           tags=["Translation"],
           responses={
               200: {"description": "Translation result", "model": TranslationResponse},
+              400: {"description": "Invalid encrypted sentences or languages"},
               401: {"description": "Unauthorized - Token required"},
               500: {"description": "Translation service error"},
               504: {"description": "Translation service timeout"}
           })
 async def translate(
     request: TranslationRequest,
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    x_session_key: str = Header(..., alias="X-Session-Key")
 ):
     user_id = await get_current_user(credentials)
-    logger.info(f"Received translation request: {request.dict()}, user_id: {user_id}")
+    session_key = base64.b64decode(x_session_key)
     
-    external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/translate?src_lang={request.src_lang}&tgt_lang={request.tgt_lang}"
+    # Decrypt sentences
+    decrypted_sentences = []
+    for sentence in request.sentences:
+        try:
+            encrypted_sentence = base64.b64decode(sentence)
+            decrypted_sentence = decrypt_data(encrypted_sentence, session_key).decode("utf-8")
+            decrypted_sentences.append(decrypted_sentence)
+        except Exception as e:
+            logger.error(f"Sentence decryption failed: {str(e)}")
+            raise HTTPException(status_code=400, detail="Invalid encrypted sentence")
+    
+    # Decrypt source language
+    try:
+        encrypted_src_lang = base64.b64decode(request.src_lang)
+        decrypted_src_lang = decrypt_data(encrypted_src_lang, session_key).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Source language decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted source language")
+    
+    # Decrypt target language
+    try:
+        encrypted_tgt_lang = base64.b64decode(request.tgt_lang)
+        decrypted_tgt_lang = decrypt_data(encrypted_tgt_lang, session_key).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Target language decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted target language")
+    
+    logger.info(f"Received translation request: {decrypted_sentences}, src_lang: {decrypted_src_lang}, tgt_lang: {decrypted_tgt_lang}, user_id: {user_id}")
+    
+    external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/translate?src_lang={decrypted_src_lang}&tgt_lang={decrypted_tgt_lang}"
     
     payload = {
-        "sentences": request.sentences,
-        "src_lang": request.src_lang,
-        "tgt_lang": request.tgt_lang
+        "sentences": decrypted_sentences,
+        "src_lang": decrypted_src_lang,
+        "tgt_lang": decrypted_tgt_lang
     }
     
     try:
@@ -532,7 +673,7 @@ async def translate(
         response_data = response.json()
         translations = response_data.get("translations", [])
         
-        if not translations or len(translations) != len(request.sentences):
+        if not translations or len(translations) != len(decrypted_sentences):
             logger.warning(f"Unexpected response format: {response_data}")
             raise HTTPException(status_code=500, detail="Invalid response from translation service")
         
@@ -549,61 +690,91 @@ async def translate(
         logger.error(f"Invalid JSON response: {str(e)}")
         raise HTTPException(status_code=500, detail="Invalid response format from translation service")
 
-class VisualQueryRequest(BaseModel):
-    query: str
-    src_lang: str = "kan_Knda"  # Default to Kannada
-    tgt_lang: str = "kan_Knda"  # Default to Kannada
-
-    @field_validator("query")
-    def query_must_be_valid(cls, v):
-        if len(v) > 1000:
-            raise ValueError("Query cannot exceed 1000 characters")
-        return v.strip()
-
-class VisualQueryResponse(BaseModel):
-    answer: str
-
 @app.post("/v1/visual_query", 
           response_model=VisualQueryResponse,
           summary="Visual Query with Image",
-          description="Process a visual query with an image and text question. Rate limited to 100 requests per minute per user. Requires authentication.",
+          description="Process a visual query with an encrypted text query, encrypted image, and encrypted language codes provided in a JSON body named 'data'. Rate limited to 100 requests per minute per user. Requires authentication and X-Session-Key header.",
           tags=["Chat"],
           responses={
               200: {"description": "Query response", "model": VisualQueryResponse},
-              400: {"description": "Invalid query"},
+              400: {"description": "Invalid query, encrypted data, or language codes"},
               401: {"description": "Unauthorized - Token required"},
+              422: {"description": "Validation error in request body"},
               429: {"description": "Rate limit exceeded"},
               504: {"description": "Visual query service timeout"}
           })
 @limiter.limit(settings.chat_rate_limit)
 async def visual_query(
     request: Request,
-    query: str = Form(..., description="Text query for the visual content"),
-    file: UploadFile = File(..., description="Image file to analyze"),
-    src_lang: str = Query(default="kan_Knda", description="Source language code"),
-    tgt_lang: str = Query(default="kan_Knda", description="Target language code"),
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+    data: str = Form(..., description="JSON string containing encrypted query, src_lang, and tgt_lang"),
+    file: UploadFile = File(..., description="Encrypted image file to analyze"),
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    x_session_key: str = Header(..., alias="X-Session-Key")
 ):
     user_id = await get_current_user(credentials)
-    if not query.strip():
+    session_key = base64.b64decode(x_session_key)
+    
+    # Parse and validate JSON data
+    try:
+        import json
+        visual_query_request = VisualQueryRequest.parse_raw(data)
+        logger.info(f"Received visual query JSON: {data}")
+    except Exception as e:
+        logger.error(f"Failed to parse JSON data: {str(e)}")
+        raise HTTPException(status_code=422, detail=f"Invalid JSON data: {str(e)}")
+    
+    # Decrypt query
+    try:
+        encrypted_query = base64.b64decode(visual_query_request.query)
+        decrypted_query = decrypt_data(encrypted_query, session_key).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Query decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted query")
+    
+    # Decrypt source language
+    try:
+        encrypted_src_lang = base64.b64decode(visual_query_request.src_lang)
+        decrypted_src_lang = decrypt_data(encrypted_src_lang, session_key).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Source language decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted source language")
+    
+    # Decrypt target language
+    try:
+        encrypted_tgt_lang = base64.b64decode(visual_query_request.tgt_lang)
+        decrypted_tgt_lang = decrypt_data(encrypted_tgt_lang, session_key).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Target language decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted target language")
+    
+    if not decrypted_query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
+    if len(decrypted_query) > 1000:
+        raise HTTPException(status_code=400, detail="Decrypted query cannot exceed 1000 characters")
+    
+    # Decrypt image
+    try:
+        encrypted_content = await file.read()
+        decrypted_content = decrypt_data(encrypted_content, session_key)
+    except Exception as e:
+        logger.error(f"Image decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted image")
     
     logger.info("Processing visual query request", extra={
         "endpoint": "/v1/visual_query",
-        "query_length": len(query),
+        "query_length": len(decrypted_query),
         "file_name": file.filename,
         "client_ip": get_remote_address(request),
         "user_id": user_id,
-        "src_lang": src_lang,
-        "tgt_lang": tgt_lang
+        "src_lang": decrypted_src_lang,
+        "tgt_lang": decrypted_tgt_lang
     })
     
-    external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/v1/visual_query/?src_lang={src_lang}&tgt_lang={tgt_lang}"
+    external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/v1/visual_query/?src_lang={decrypted_src_lang}&tgt_lang={decrypted_tgt_lang}"
     
     try:
-        file_content = await file.read()
-        files = {"file": (file.filename, file_content, file.content_type)}
-        data = {"query": query}
+        files = {"file": (file.filename, decrypted_content, file.content_type)}
+        data = {"query": decrypted_query}
         
         response = requests.post(
             external_url,
@@ -633,25 +804,21 @@ async def visual_query(
     except ValueError as e:
         logger.error(f"Invalid JSON response: {str(e)}")
         raise HTTPException(status_code=500, detail="Invalid response format from visual query service")
-    
-# Ensure these imports are at the top with other imports
-from fastapi.responses import StreamingResponse
+
 from enum import Enum
 
-# Define supported languages for validation
 class SupportedLanguage(str, Enum):
     kannada = "kannada"
     hindi = "hindi"
     tamil = "tamil"
 
-# Add the speech-to-speech endpoint
 @app.post("/v1/speech_to_speech",
           summary="Speech-to-Speech Conversion",
-          description="Convert input speech to processed speech by calling an external speech-to-speech API. Rate limited to 5 requests per minute per user. Requires authentication.",
+          description="Convert input encrypted speech to processed speech in the specified encrypted language by calling an external speech-to-speech API. Rate limited to 5 requests per minute per user. Requires authentication and X-Session-Key header.",
           tags=["Audio"],
           responses={
               200: {"description": "Audio stream", "content": {"audio/mp3": {"example": "Binary audio data"}}},
-              400: {"description": "Invalid input"},
+              400: {"description": "Invalid input, encrypted audio, or language"},
               401: {"description": "Unauthorized - Token required"},
               429: {"description": "Rate limit exceeded"},
               504: {"description": "External API timeout"},
@@ -660,23 +827,40 @@ class SupportedLanguage(str, Enum):
 @limiter.limit(settings.speech_rate_limit)
 async def speech_to_speech(
     request: Request,
-    file: UploadFile = File(..., description="Audio file to process"),
-    language: SupportedLanguage = Query(..., description="Language of the audio (kannada, hindi, tamil)"),
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+    file: UploadFile = File(..., description="Encrypted audio file to process"),
+    language: str = Query(..., description="Base64-encoded encrypted language of the audio (kannada, hindi, tamil after decryption)"),
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    x_session_key: str = Header(..., alias="X-Session-Key")
 ) -> StreamingResponse:
     user_id = await get_current_user(credentials)
+    session_key = base64.b64decode(x_session_key)
+    
+    # Decrypt the language
+    try:
+        encrypted_language = base64.b64decode(language)
+        decrypted_language = decrypt_data(encrypted_language, session_key).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Language decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid encrypted language")
+    
+    # Validate language
+    allowed_languages = [lang.value for lang in SupportedLanguage]
+    if decrypted_language not in allowed_languages:
+        raise HTTPException(status_code=400, detail=f"Language must be one of {allowed_languages}")
+    
     logger.info("Processing speech-to-speech request", extra={
         "endpoint": "/v1/speech_to_speech",
         "audio_filename": file.filename,
-        "language": language,
+        "language": decrypted_language,
         "client_ip": get_remote_address(request),
         "user_id": user_id
     })
 
     try:
-        file_content = await file.read()
+        encrypted_content = await file.read()
+        file_content = decrypt_data(encrypted_content, session_key)
         files = {"file": (file.filename, file_content, file.content_type)}
-        external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/v1/speech_to_speech?language={language}"
+        external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/v1/speech_to_speech?language={decrypted_language}"
 
         response = requests.post(
             external_url,

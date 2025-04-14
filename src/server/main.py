@@ -105,8 +105,11 @@ class LLMManager:
                     device_map="auto",
                     quantization_config=quantization_config,
                     torch_dtype=self.torch_dtype
-                ).eval()
-                self.processor = AutoProcessor.from_pretrained(self.model_name)
+                )
+                if self.model is None:
+                    raise ValueError(f"Failed to load model {self.model_name}: Model object is None")
+                self.model.eval()
+                self.processor = AutoProcessor.from_pretrained(self.model_name, use_fast=True)
                 dummy_input = self.processor("test", return_tensors="pt").to(self.device)
                 with torch.no_grad():
                     self.model.generate(**dummy_input, max_new_tokens=10)
@@ -115,6 +118,7 @@ class LLMManager:
             except Exception as e:
                 logger.error(f"Failed to load LLM: {str(e)}")
                 self.is_loaded = False
+                raise  # Re-raise to ensure failure is caught upstream
 
     def unload(self):
         if self.is_loaded:
@@ -575,7 +579,7 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 
 # Endpoints
-@app.post("/audio/speech", response_class=StreamingResponse)
+@app.post("/v1/audio/speech", response_class=StreamingResponse)
 async def synthesize_kannada(request: KannadaSynthesizeRequest):
     if not tts_manager.model:
         raise HTTPException(status_code=503, detail="TTS model not loaded")
@@ -589,7 +593,7 @@ async def synthesize_kannada(request: KannadaSynthesizeRequest):
         headers={"Content-Disposition": "attachment; filename=synthesized_kannada_speech.wav"}
     )
 
-@app.post("/translate", response_model=TranslationResponse)
+@app.post("/v1/translate", response_model=TranslationResponse)
 async def translate(request: TranslationRequest, translate_manager: TranslateManager = Depends(get_translate_manager)):
     if not request.sentences:
         raise HTTPException(status_code=400, detail="Input sentences are required")
@@ -823,7 +827,7 @@ async def chat_v2(
             logger.error(f"Error processing request: {str(e)}")
             raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
-@app.post("/transcribe/", response_model=TranscriptionResponse)
+@app.post("/v1/transcribe/", response_model=TranscriptionResponse)
 async def transcribe_audio(file: UploadFile = File(...), language: str = Query(..., enum=list(asr_manager.model_language.keys()))):
     async with request_queue:
         if not asr_manager.model:
@@ -896,4 +900,5 @@ if __name__ == "__main__":
     host = args.host if args.host != settings.host else settings.host
     port = args.port if args.port != settings.port else settings.port
 
-    uvicorn.run(app, host=host, port=port, workers=2)
+    # Run Uvicorn with import string to support workers
+    uvicorn.run("main:app", host=host, port=port, workers=2)
