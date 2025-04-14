@@ -453,6 +453,7 @@ class ChatRequest(BaseModel):
             raise ValueError(f"Unsupported language code: {v}. Supported codes: {', '.join(SUPPORTED_LANGUAGES)}")
         return v
 
+
 class ChatResponse(BaseModel):
     response: str
 
@@ -531,6 +532,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Add CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -539,11 +541,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add Timing Middleware
+@app.middleware("http")
+async def add_request_timing(request: Request, call_next):
+    start_time = time()
+    response = await call_next(request)
+    end_time = time()
+    duration = end_time - start_time
+    logger.info(f"Request to {request.url.path} took {duration:.3f} seconds")
+    response.headers["X-Response-Time"] = f"{duration:.3f}"
+    return response
+
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 
 # API Endpoints
-@app.post("/audio/speech", response_class=StreamingResponse)
+@app.post("/v1/audio/speech", response_class=StreamingResponse)
 async def synthesize_kannada(request: KannadaSynthesizeRequest):
     if not tts_manager.model:
         raise HTTPException(status_code=503, detail="TTS model not loaded")
@@ -564,7 +577,7 @@ async def synthesize_kannada(request: KannadaSynthesizeRequest):
         headers={"Content-Disposition": "attachment; filename=synthesized_kannada_speech.wav"}
     )
 
-@app.post("/translate", response_model=TranslationResponse)
+@app.post("/v0/translate", response_model=TranslationResponse)
 async def translate(request: TranslationRequest, translate_manager: TranslateManager = Depends(get_translate_manager)):
     input_sentences = request.sentences
     src_lang = request.src_lang
@@ -831,7 +844,7 @@ async def chat_v2(
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
-@app.post("/transcribe/", response_model=TranscriptionResponse)
+@app.post("/v1/transcribe/", response_model=TranscriptionResponse)
 async def transcribe_audio(file: UploadFile = File(...), language: str = Query(..., enum=list(asr_manager.model_language.keys()))):
     if not asr_manager.model:
         raise HTTPException(status_code=503, detail="ASR model not loaded")
