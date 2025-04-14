@@ -8,3 +8,4 @@ pillow
 pyjwt
 sqlalchemy
 passlib[bcrypt]
+pycryptodome
