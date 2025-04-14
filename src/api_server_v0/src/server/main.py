@@ -619,45 +619,65 @@ async def translate(
     x_session_key: str = Header(..., alias="X-Session-Key")
 ):
     user_id = await get_current_user(credentials)
-    session_key = base64.b64decode(x_session_key)
-    
+    try:
+        session_key = base64.b64decode(x_session_key)
+    except Exception as e:
+        logger.error(f"Invalid X-Session-Key: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid session key")
+
     # Decrypt sentences
     decrypted_sentences = []
     for sentence in request.sentences:
         try:
             encrypted_sentence = base64.b64decode(sentence)
             decrypted_sentence = decrypt_data(encrypted_sentence, session_key).decode("utf-8")
+            if not decrypted_sentence.strip():
+                raise ValueError("Decrypted sentence is empty")
             decrypted_sentences.append(decrypted_sentence)
         except Exception as e:
             logger.error(f"Sentence decryption failed: {str(e)}")
-            raise HTTPException(status_code=400, detail="Invalid encrypted sentence")
-    
+            raise HTTPException(status_code=400, detail=f"Invalid encrypted sentence: {str(e)}")
+
     # Decrypt source language
     try:
         encrypted_src_lang = base64.b64decode(request.src_lang)
         decrypted_src_lang = decrypt_data(encrypted_src_lang, session_key).decode("utf-8")
+        if not decrypted_src_lang.strip():
+            raise ValueError("Decrypted source language is empty")
     except Exception as e:
         logger.error(f"Source language decryption failed: {str(e)}")
-        raise HTTPException(status_code=400, detail="Invalid encrypted source language")
-    
+        raise HTTPException(status_code=400, detail=f"Invalid encrypted source language: {str(e)}")
+
     # Decrypt target language
     try:
         encrypted_tgt_lang = base64.b64decode(request.tgt_lang)
         decrypted_tgt_lang = decrypt_data(encrypted_tgt_lang, session_key).decode("utf-8")
+        if not decrypted_tgt_lang.strip():
+            raise ValueError("Decrypted target language is empty")
     except Exception as e:
         logger.error(f"Target language decryption failed: {str(e)}")
-        raise HTTPException(status_code=400, detail="Invalid encrypted target language")
-    
-    logger.info(f"Received translation request: {decrypted_sentences}, src_lang: {decrypted_src_lang}, tgt_lang: {decrypted_tgt_lang}, user_id: {user_id}")
-    
-    external_url = f"https://slabstech-dhwani-internal-api-server.hf.space/translate?src_lang={decrypted_src_lang}&tgt_lang={decrypted_tgt_lang}"
-    
+        raise HTTPException(status_code=400, detail=f"Invalid encrypted target language: {str(e)}")
+
+    # Validate language codes
+    supported_languages = [
+        "eng_Latn", "hin_Deva", "kan_Knda", "tam_Taml", "mal_Mlym", "tel_Telu",
+        "deu_Latn", "fra_Latn", "nld_Latn", "spa_Latn", "ita_Latn", "por_Latn",
+        "rus_Cyrl", "pol_Latn"
+    ]
+    if decrypted_src_lang not in supported_languages or decrypted_tgt_lang not in supported_languages:
+        logger.error(f"Unsupported language codes: src={decrypted_src_lang}, tgt={decrypted_tgt_lang}")
+        raise HTTPException(status_code=400, detail=f"Unsupported language codes: src={decrypted_src_lang}, tgt={decrypted_tgt_lang}")
+
+    logger.info(f"Received translation request: {len(decrypted_sentences)} sentences, src_lang: {decrypted_src_lang}, tgt_lang: {decrypted_tgt_lang}, user_id: {user_id}")
+
+    external_url = "https://slabstech-dhwani-internal-api-server.hf.space/v1/translate"
+
     payload = {
         "sentences": decrypted_sentences,
         "src_lang": decrypted_src_lang,
         "tgt_lang": decrypted_tgt_lang
     }
-    
+
     try:
         response = requests.post(
             external_url,
@@ -669,17 +689,17 @@ async def translate(
             timeout=60
         )
         response.raise_for_status()
-        
+
         response_data = response.json()
         translations = response_data.get("translations", [])
-        
+
         if not translations or len(translations) != len(decrypted_sentences):
             logger.warning(f"Unexpected response format: {response_data}")
             raise HTTPException(status_code=500, detail="Invalid response from translation service")
-        
+
         logger.info(f"Translation successful: {translations}")
         return TranslationResponse(translations=translations)
-    
+
     except requests.Timeout:
         logger.error("Translation request timed out")
         raise HTTPException(status_code=504, detail="Translation service timeout")
