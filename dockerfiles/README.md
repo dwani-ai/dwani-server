@@ -1,9 +1,21 @@
+Building Docker Images for Dhwani 
 
-docker build -f Dockerfile.base -t slabstech/dhwani-server-base .
+- Model Server 
 
-docker push slabstech/dhwani-server-base  
+  - Base Model
+    - docker build -f Dockerfile.base -t slabstech/dhwani-server-base .
+    - docker push slabstech/dhwani-server-base  
+
+  - Deploy model
+    - docker build -f Dockerfile -t slabstech/dhwani-server-model .
+    - docker push slabstech/dhwani-model-server
 
 
-docker build -f Dockerfile -t slabstech/dhwani-server-model .
+- API Server
+  - Base model
+    - docker build -f Dockerfile.base -t slabstech/dhwani-api-server-base .
+    - docker push slabstech/dhwani-api-server-base
 
-docker push slabstech/dhwani-model-server
+  - Deploy model
+    - docker build -f Dockerfile -t slabstech/dhwani-api-server .
+    - docker push slabstech/dhwani-api-server
