@@ -1,5 +1,5 @@
 # Base image with CUDA support
-FROM nvidia/cuda:12.8.0-base-ubuntu22.04 AS model-downloader
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04 AS model-downloader
 
 WORKDIR /app
 
@@ -25,8 +25,9 @@ ENV CXX=/usr/bin/g++
 
 # Upgrade pip and install Python dependencies in one layer
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip setuptools setuptools-rust && \
-    pip install --no-cache-dir torch flash-attn -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools setuptools-rust torch && \
+    pip install --no-cache-dir flash-attn  --no-build-isolation  && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Set up user
 RUN useradd -ms /bin/bash appuser && chown -R appuser:appuser /app
