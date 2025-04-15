@@ -12,3 +12,4 @@ slowapi==0.1.9
 aiohttp==3.10.5
 bleach==6.1.0
 pillow==10.4.0
+pydub==0.25.1

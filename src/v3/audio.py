@@ -8,6 +8,8 @@ from fastapi.security import HTTPAuthorizationCredentials
 import aiohttp
 import bleach
 from pybreaker import CircuitBreaker
+from pydub import AudioSegment
+from pydub.exceptions import CouldntDecodeError
 
 from src.server.utils.auth import get_current_user, bearer_scheme, Settings
 from src.server.utils.crypto import decrypt_data
@@ -23,11 +25,29 @@ audio_proc_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 speech_to_speech_breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
 
 def estimate_audio_duration(audio_content: bytes, format: str) -> float:
-    # Placeholder for accurate duration calculation
-    # For production, use pydub: `from pydub import AudioSegment`
-    # audio = AudioSegment.from_file(io.BytesIO(audio_content), format=format)
-    # return len(audio) / 1000.0
-    return len(audio_content) / 16000  # Rough estimate for mp3
+    """
+    Calculate the accurate duration of an audio file using pydub.
+    
+    Args:
+        audio_content (bytes): The audio data in bytes.
+        format (str): The audio format (e.g., 'mp3', 'wav', 'flac').
+    
+    Returns:
+        float: Duration in seconds.
+    
+    Raises:
+        CouldntDecodeError: If the audio cannot be decoded.
+    """
+    try:
+        audio = AudioSegment.from_file(io.BytesIO(audio_content), format=format)
+        return len(audio) / 1000.0  # Convert milliseconds to seconds
+    except CouldntDecodeError as e:
+        logger.error(f"Failed to decode audio for duration calculation: {str(e)}")
+        # Fallback to rough estimate
+        return len(audio_content) / 16000
+    except Exception as e:
+        logger.error(f"Unexpected error calculating audio duration: {str(e)}")
+        return len(audio_content) / 16000
 
 class SupportedLanguage(str, Enum):
     kannada = "kannada"
