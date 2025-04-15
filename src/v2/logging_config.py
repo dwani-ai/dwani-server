@@ -3,6 +3,9 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 import json
+from src.server.utils.auth import Settings
+
+settings = Settings()
 
 class JsonFormatter(logging.Formatter):
     def format(self, record):
@@ -14,7 +17,6 @@ class JsonFormatter(logging.Formatter):
             "funcName": record.funcName,
             "line": record.lineno,
         }
-        # Include extra fields if provided (e.g., client_ip, user_id)
         if hasattr(record, 'extra'):
             log_data.update(record.extra)
         if record.exc_info:
@@ -23,7 +25,19 @@ class JsonFormatter(logging.Formatter):
 
 # Configure logger
 logger = logging.getLogger("dhwani_api")
-logger.setLevel(logging.INFO)  # Default level, configurable via environment if needed
+
+# Map string log levels to logging module constants
+log_level_map = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL
+}
+
+# Set log level from settings, default to INFO
+log_level = log_level_map.get(settings.log_level.upper(), logging.INFO)
+logger.setLevel(log_level)
 
 # Console handler
 console_handler = logging.StreamHandler(sys.stdout)

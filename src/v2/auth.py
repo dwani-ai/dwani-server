@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     default_admin_password: str = Field("admin54321", env="DEFAULT_ADMIN_PASSWORD")
     encryption_key: str = Field(..., env="ENCRYPTION_KEY")
     database_path: str = Field("/data/users.db", env="DATABASE_PATH")
+    log_level: str = Field("INFO", env="LOG_LEVEL")  # Controls logging verbosity
 
     class Config:
         env_file = ".env"
