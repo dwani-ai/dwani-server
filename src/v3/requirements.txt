@@ -1,0 +1,14 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+databases[sqlite]==0.9.0
+pydantic==2.9.2
+pydantic-settings==2.5.2
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+cryptography==43.0.1
+pycryptodome==3.20.0
+pybreaker==2.0.0
+slowapi==0.1.9
+aiohttp==3.10.5
+bleach==6.1.0
+pillow==10.4.0
