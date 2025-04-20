@@ -3,6 +3,9 @@
 # Clone the repository
 git clone https://huggingface.co/spaces/slabstech/dhwani-internal-api-server
 
+cd dhwani-internal-api-server
+
+
 # Install dependencies
 sudo apt-get install -y ffmpeg build-essential
 
@@ -26,4 +29,4 @@ pip install --no-cache-dir flash-attn --no-build-isolation
 pip install --no-cache-dir -r requirements.txt
 
 # Run the server
-python src/server/main.py --host 0.0.0.0 --port 7860 --config config_two
+#python src/server/main.py --host 0.0.0.0 --port 7860 --config config_two
