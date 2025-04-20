@@ -28,5 +28,6 @@ pip install --no-cache-dir --upgrade pip setuptools psutil setuptools-rust torch
 pip install --no-cache-dir flash-attn --no-build-isolation
 pip install --no-cache-dir -r requirements.txt
 
+export HF_HOME=/home/ubuntu/data-dhwani-models
 # Run the server
 #python src/server/main.py --host 0.0.0.0 --port 7860 --config config_two

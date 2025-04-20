@@ -20,6 +20,16 @@ Dhwani API is a FastAPI-based application providing AI-powered services for Indi
   - Optional: NVIDIA GPU with CUDA support for faster inference.
 - **FFmpeg**: Required for audio processing (ASR).
 
+- Server Setup
+```bash
+wget https://github.com/slabstech/dhwani-server/blob/4445b380fc07d2e552cd98776465ee751b7e9997/install_script.sh
+chmod +x install_script.sh
+bash install_script.sh
+
+export HF_HOME=/home/ubuntu/data-dhwani-models
+export HF_TOKEN='YOur-HF-token'
+python src/server/main.py --host 0.0.0.0 --port 7860 --config config_two
+```
 ## Installation
 
 1. **Clone the Repository**:
