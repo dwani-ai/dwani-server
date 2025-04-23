@@ -76,8 +76,8 @@ quantization_config = BitsAndBytesConfig(
     bnb_4bit_compute_dtype=torch.bfloat16
 )
 
-# Request queue for concurrency control
-request_queue = asyncio.Queue(maxsize=20)  # Increased to handle more concurrent requests
+# Request queue for LLM batching
+request_queue = asyncio.Queue(maxsize=20)
 
 # Logging optimization
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -97,7 +97,7 @@ class SingletonModelManager:
     def __init__(self):
         if not self.initialized:
             with self._lock:
-                if not self.initialized:  # Double-checked locking
+                if not self.initialized:
                     self.llm_manager = None
                     self.tts_manager = None
                     self.asr_manager = None
@@ -106,7 +106,6 @@ class SingletonModelManager:
                     self.logger = logging.getLogger("indic_all_server")
 
     def initialize_models(self, llm_model_name: str, device: str = "cuda:0"):
-        """Load all models in the parent process."""
         with self._lock:
             if self.llm_manager is None:
                 self.logger.info("Initializing LLMManager...")
@@ -126,7 +125,6 @@ class SingletonModelManager:
             if self.model_manager is None:
                 self.logger.info("Initializing ModelManager...")
                 self.model_manager = ModelManager(device, use_distilled=True, is_lazy_loading=True)
-                # Preload translation models
                 translation_tasks = [
                     ('eng_Latn', 'kan_Knda', 'eng_indic'),
                     ('kan_Knda', 'eng_Latn', 'indic_eng'),
@@ -215,11 +213,11 @@ class LLMManager:
         self.token_cache[cache_key] = response
         self.logger.info(f"Generated response: {response[:50]}...")
         if self.device.type == "cuda":
-            torch.cuda.empty_cache()  # Clear cache after inference
+            torch.cuda.empty_cache()
         return response
 
     async def batch_generate(self, prompts: List[Dict]) -> List[str]:
-        batch_size = 2  # Reduced to conserve memory
+        batch_size = 2
         responses = []
         for i in range(0, len(prompts), batch_size):
             batch_prompts = prompts[i:i + batch_size]
@@ -258,7 +256,7 @@ class LLMManager:
             ]
             self.logger.info(f"Batch generated {len(responses)} responses")
             if self.device.type == "cuda":
-                torch.cuda.empty_cache()  # Clear cache after inference
+                torch.cuda.empty_cache()
             return responses
         except Exception as e:
             self.logger.error(f"Error in batch generation: {str(e)}", exc_info=True)
@@ -289,7 +287,7 @@ class LLMManager:
         decoded = self.processor.decode(generation, skip_special_tokens=True)
         self.logger.info(f"Vision query response: {decoded[:50]}...")
         if self.device.type == "cuda":
-            torch.cuda.empty_cache()  # Clear cache after inference
+            torch.cuda.empty_cache()
         return decoded
 
     async def chat_v2(self, image: Image.Image, query: str) -> str:
@@ -317,7 +315,7 @@ class LLMManager:
         decoded = self.processor.decode(generation, skip_special_tokens=True)
         self.logger.info(f"Chat_v2 response: {decoded[:50]}...")
         if self.device.type == "cuda":
-            torch.cuda.empty_cache()  # Clear cache after inference
+            torch.cuda.empty_cache()
         return decoded
 
 # TTS Manager
@@ -351,7 +349,7 @@ class TTSManager:
         with autocast():
             audio = self.model(text, ref_audio_path=ref_audio_path, ref_text=ref_text)
             if self.device_type.type == "cuda":
-                torch.cuda.empty_cache()  # Clear cache after inference
+                torch.cuda.empty_cache()
             return audio
 
 # Translation Manager
@@ -534,27 +532,26 @@ def load_audio_from_url(url: str):
     raise HTTPException(status_code=500, detail="Failed to load reference audio from URL after retries")
 
 async def synthesize_speech(tts_manager: TTSManager, text: str, ref_audio_name: str, ref_text: str) -> io.BytesIO:
-    async with request_queue:
-        ref_audio_url = next((ex["audio_url"] for ex in EXAMPLES if ex["audio_name"] == ref_audio_name), None)
-        if not ref_audio_url:
-            raise HTTPException(status_code=400, detail="Invalid reference audio name.")
-        if not text.strip() or not ref_text.strip():
-            raise HTTPException(status_code=400, detail="Text or reference text cannot be empty.")
+    ref_audio_url = next((ex["audio_url"] for ex in EXAMPLES if ex["audio_name"] == ref_audio_name), None)
+    if not ref_audio_url:
+        raise HTTPException(status_code=400, detail="Invalid reference audio name.")
+    if not text.strip() or not ref_text.strip():
+        raise HTTPException(status_code=400, detail="Text or reference text cannot be empty.")
 
-        logger.info(f"Synthesizing speech for text: {text[:50]}... with ref_audio: {ref_audio_name}")
-        loop = asyncio.get_running_loop()
-        sample_rate, audio_data = await loop.run_in_executor(None, load_audio_from_url, ref_audio_url)
+    logger.info(f"Synthesizing speech for text: {text[:50]}... with ref_audio: {ref_audio_name}")
+    loop = asyncio.get_running_loop()
+    sample_rate, audio_data = await loop.run_in_executor(None, load_audio_from_url, ref_audio_url)
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_audio:
-            await loop.run_in_executor(None, sf.write, temp_audio.name, audio_data, sample_rate, "WAV")
-            temp_audio.flush()
-            audio = tts_manager.synthesize(text, temp_audio.name, ref_text)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_audio:
+        await loop.run_in_executor(None, sf.write, temp_audio.name, audio_data, sample_rate, "WAV")
+        temp_audio.flush()
+        audio = tts_manager.synthesize(text, temp_audio.name, ref_text)
 
-        buffer = io.BytesIO()
-        await loop.run_in_executor(None, sf.write, buffer, audio.astype(np.float32) / 32768.0 if audio.dtype == np.int16 else audio, 24000, "WAV")
-        buffer.seek(0)
-        logger.info("Speech synthesis completed")
-        return buffer
+    buffer = io.BytesIO()
+    await loop.run_in_executor(None, sf.write, buffer, audio.astype(np.float32) / 32768.0 if audio.dtype == np.int16 else audio, 24000, "WAV")
+    buffer.seek(0)
+    logger.info("Speech synthesis completed")
+    return buffer
 
 # Supported Languages
 SUPPORTED_LANGUAGES = {
@@ -580,6 +577,11 @@ def get_asr_manager():
 def get_translate_manager(src_lang: str, tgt_lang: str) -> TranslateManager:
     return singleton_manager.get_model_manager().get_model(src_lang, tgt_lang)
 
+def get_asr_languages(asr_manager: ASRModelManager = Depends(get_asr_manager)):
+    if not asr_manager:
+        raise HTTPException(status_code=503, detail="ASR manager not initialized")
+    return list(asr_manager.model_language.keys())
+
 # Translation Function
 async def perform_internal_translation(sentences: List[str], src_lang: str, tgt_lang: str) -> List[str]:
     try:
@@ -598,7 +600,7 @@ async def perform_internal_translation(sentences: List[str], src_lang: str, tgt_
         generated_tokens = translate_manager.tokenizer.batch_decode(generated_tokens.detach().cpu().tolist(), skip_special_tokens=True, clean_up_tokenization_spaces=True)
     translations = ip.postprocess_batch(generated_tokens, lang=tgt_lang)
     if translate_manager.device_type.type == "cuda":
-        torch.cuda.empty_cache()  # Clear cache after inference
+        torch.cuda.empty_cache()
     return translations
 
 # Lifespan Event Handler
@@ -705,7 +707,7 @@ async def translate(request: TranslationRequest, translate_manager: TranslateMan
         generated_tokens = translate_manager.tokenizer.batch_decode(generated_tokens.detach().cpu().tolist(), skip_special_tokens=True, clean_up_tokenization_spaces=True)
     translations = ip.postprocess_batch(generated_tokens, lang=request.tgt_lang)
     if translate_manager.device_type.type == "cuda":
-        torch.cuda.empty_cache()  # Clear cache after inference
+        torch.cuda.empty_cache()
     return TranslationResponse(translations=translations)
 
 @app.get("/v1/health")
@@ -808,32 +810,31 @@ async def translate_endpoint(request: TranslationRequest):
 @app.post("/v1/chat", response_model=ChatResponse)
 @limiter.limit(settings.chat_rate_limit)
 async def chat(request: Request, chat_request: ChatRequest, llm_manager: LLMManager = Depends(get_llm_manager)):
-    async with request_queue:
-        if not chat_request.prompt:
-            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
-        logger.info(f"Received prompt: {chat_request.prompt}, src_lang: {chat_request.src_lang}, tgt_lang: {chat_request.tgt_lang}")
-        EUROPEAN_LANGUAGES = {"deu_Latn", "fra_Latn", "nld_Latn", "spa_Latn", "ita_Latn", "por_Latn", "rus_Cyrl", "pol_Latn"}
-        try:
-            if chat_request.src_lang != "eng_Latn" and chat_request.src_lang not in EUROPEAN_LANGUAGES:
-                translated_prompt = await perform_internal_translation([chat_request.prompt], chat_request.src_lang, "eng_Latn")
-                prompt_to_process = translated_prompt[0]
-                logger.info(f"Translated prompt to English: {prompt_to_process}")
-            else:
-                prompt_to_process = chat_request.prompt
-                logger.info("Prompt in English or European language, no translation needed")
-            response = await llm_manager.generate(prompt_to_process, settings.max_tokens)
-            logger.info(f"Generated English response: {response}")
-            if chat_request.tgt_lang != "eng_Latn" and chat_request.tgt_lang not in EUROPEAN_LANGUAGES:
-                translated_response = await perform_internal_translation([response], "eng_Latn", chat_request.tgt_lang)
-                final_response = translated_response[0]
-                logger.info(f"Translated response to {chat_request.tgt_lang}: {final_response}")
-            else:
-                final_response = response
-                logger.info(f"Response in {chat_request.tgt_lang}, no translation needed")
-            return ChatResponse(response=final_response)
-        except Exception as e:
-            logger.error(f"Error processing request: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    if not chat_request.prompt:
+        raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+    logger.info(f"Received prompt: {chat_request.prompt}, src_lang: {chat_request.src_lang}, tgt_lang: {chat_request.tgt_lang}")
+    EUROPEAN_LANGUAGES = {"deu_Latn", "fra_Latn", "nld_Latn", "spa_Latn", "ita_Latn", "por_Latn", "rus_Cyrl", "pol_Latn"}
+    try:
+        if chat_request.src_lang != "eng_Latn" and chat_request.src_lang not in EUROPEAN_LANGUAGES:
+            translated_prompt = await perform_internal_translation([chat_request.prompt], chat_request.src_lang, "eng_Latn")
+            prompt_to_process = translated_prompt[0]
+            logger.info(f"Translated prompt to English: {prompt_to_process}")
+        else:
+            prompt_to_process = chat_request.prompt
+            logger.info("Prompt in English or European language, no translation needed")
+        response = await llm_manager.generate(prompt_to_process, settings.max_tokens)
+        logger.info(f"Generated English response: {response}")
+        if chat_request.tgt_lang != "eng_Latn" and chat_request.tgt_lang not in EUROPEAN_LANGUAGES:
+            translated_response = await perform_internal_translation([response], "eng_Latn", chat_request.tgt_lang)
+            final_response = translated_response[0]
+            logger.info(f"Translated response to {chat_request.tgt_lang}: {final_response}")
+        else:
+            final_response = response
+            logger.info(f"Response in {chat_request.tgt_lang}, no translation needed")
+        return ChatResponse(response=final_response)
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 @app.post("/v1/visual_query/")
 async def visual_query(
@@ -843,31 +844,30 @@ async def visual_query(
     tgt_lang: str = Query("kan_Knda", enum=list(SUPPORTED_LANGUAGES)),
     llm_manager: LLMManager = Depends(get_llm_manager)
 ):
-    async with request_queue:
-        try:
-            image = Image.open(file.file)
-            if image.size == (0, 0):
-                raise HTTPException(status_code=400, detail="Uploaded image is empty or invalid")
-            if src_lang != "eng_Latn":
-                translated_query = await perform_internal_translation([query], src_lang, "eng_Latn")
-                query_to_process = translated_query[0]
-                logger.info(f"Translated query to English: {query_to_process}")
-            else:
-                query_to_process = query
-                logger.info("Query already in English, no translation needed")
-            answer = await llm_manager.vision_query(image, query_to_process)
-            logger.info(f"Generated English answer: {answer}")
-            if tgt_lang != "eng_Latn":
-                translated_answer = await perform_internal_translation([answer], "eng_Latn", tgt_lang)
-                final_answer = translated_answer[0]
-                logger.info(f"Translated answer to {tgt_lang}: {final_answer}")
-            else:
-                final_answer = answer
-                logger.info("Answer kept in English, no translation needed")
-            return {"answer": final_answer}
-        except Exception as e:
-            logger.error(f"Error processing request: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    try:
+        image = Image.open(file.file)
+        if image.size == (0, 0):
+            raise HTTPException(status_code=400, detail="Uploaded image is empty or invalid")
+        if src_lang != "eng_Latn":
+            translated_query = await perform_internal_translation([query], src_lang, "eng_Latn")
+            query_to_process = translated_query[0]
+            logger.info(f"Translated query to English: {query_to_process}")
+        else:
+            query_to_process = query
+            logger.info("Query already in English, no translation needed")
+        answer = await llm_manager.vision_query(image, query_to_process)
+        logger.info(f"Generated English answer: {answer}")
+        if tgt_lang != "eng_Latn":
+            translated_answer = await perform_internal_translation([answer], "eng_Latn", tgt_lang)
+            final_answer = translated_answer[0]
+            logger.info(f"Translated answer to {tgt_lang}: {final_answer}")
+        else:
+            final_answer = answer
+            logger.info("Answer kept in English, no translation needed")
+        return {"answer": final_answer}
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 @app.post("/v1/chat_v2", response_model=ChatResponse)
 @limiter.limit(settings.chat_rate_limit)
@@ -879,97 +879,94 @@ async def chat_v2(
     tgt_lang: str = Form("kan_Knda"),
     llm_manager: LLMManager = Depends(get_llm_manager)
 ):
-    async with request_queue:
-        if not prompt:
-            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
-        if src_lang not in SUPPORTED_LANGUAGES or tgt_lang not in SUPPORTED_LANGUAGES:
-            raise HTTPException(status_code=400, detail=f"Unsupported language code. Supported codes: {', '.join(SUPPORTED_LANGUAGES)}")
-        logger.info(f"Received prompt: {prompt}, src_lang: {src_lang}, tgt_lang: {tgt_lang}, Image provided: {image is not None}")
-        try:
-            if image:
-                image_data = await image.read()
-                if not image_data:
-                    raise HTTPException(status_code=400, detail="Uploaded image is empty")
-                img = Image.open(io.BytesIO(image_data))
-                if src_lang != "eng_Latn":
-                    translated_prompt = await perform_internal_translation([prompt], src_lang, "eng_Latn")
-                    prompt_to_process = translated_prompt[0]
-                    logger.info(f"Translated prompt to English: {prompt_to_process}")
-                else:
-                    prompt_to_process = prompt
-                decoded = await llm_manager.chat_v2(img, prompt_to_process)
-                logger.info(f"Generated English response: {decoded}")
-                if tgt_lang != "eng_Latn":
-                    translated_response = await perform_internal_translation([decoded], "eng_Latn", tgt_lang)
-                    final_response = translated_response[0]
-                    logger.info(f"Translated response to {tgt_lang}: {final_response}")
-                else:
-                    final_response = decoded
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+    if src_lang not in SUPPORTED_LANGUAGES or tgt_lang not in SUPPORTED_LANGUAGES:
+        raise HTTPException(status_code=400, detail=f"Unsupported language code. Supported codes: {', '.join(SUPPORTED_LANGUAGES)}")
+    logger.info(f"Received prompt: {prompt}, src_lang: {src_lang}, tgt_lang: {tgt_lang}, Image provided: {image is not None}")
+    try:
+        if image:
+            image_data = await image.read()
+            if not image_data:
+                raise HTTPException(status_code=400, detail="Uploaded image is empty")
+            img = Image.open(io.BytesIO(image_data))
+            if src_lang != "eng_Latn":
+                translated_prompt = await perform_internal_translation([prompt], src_lang, "eng_Latn")
+                prompt_to_process = translated_prompt[0]
+                logger.info(f"Translated prompt to English: {prompt_to_process}")
             else:
-                if src_lang != "eng_Latn":
-                    translated_prompt = await perform_internal_translation([prompt], src_lang, "eng_Latn")
-                    prompt_to_process = translated_prompt[0]
-                    logger.info(f"Translated prompt to English: {prompt_to_process}")
-                else:
-                    prompt_to_process = prompt
-                decoded = await llm_manager.generate(prompt_to_process, settings.max_tokens)
-                logger.info(f"Generated English response: {decoded}")
-                if tgt_lang != "eng_Latn":
-                    translated_response = await perform_internal_translation([decoded], "eng_Latn", tgt_lang)
-                    final_response = translated_response[0]
-                    logger.info(f"Translated response to {tgt_lang}: {final_response}")
-                else:
-                    final_response = decoded
-            return ChatResponse(response=final_response)
-        except Exception as e:
-            logger.error(f"Error processing request: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+                prompt_to_process = prompt
+            decoded = await llm_manager.chat_v2(img, prompt_to_process)
+            logger.info(f"Generated English response: {decoded}")
+            if tgt_lang != "eng_Latn":
+                translated_response = await perform_internal_translation([decoded], "eng_Latn", tgt_lang)
+                final_response = translated_response[0]
+                logger.info(f"Translated response to {tgt_lang}: {final_response}")
+            else:
+                final_response = decoded
+        else:
+            if src_lang != "eng_Latn":
+                translated_prompt = await perform_internal_translation([prompt], src_lang, "eng_Latn")
+                prompt_to_process = translated_prompt[0]
+                logger.info(f"Translated prompt to English: {prompt_to_process}")
+            else:
+                prompt_to_process = prompt
+            decoded = await llm_manager.generate(prompt_to_process, settings.max_tokens)
+            logger.info(f"Generated English response: {decoded}")
+            if tgt_lang != "eng_Latn":
+                translated_response = await perform_internal_translation([decoded], "eng_Latn", tgt_lang)
+                final_response = translated_response[0]
+                logger.info(f"Translated response to {tgt_lang}: {final_response}")
+            else:
+                final_response = decoded
+        return ChatResponse(response=final_response)
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 @app.post("/transcribe/", response_model=TranscriptionResponse)
 async def transcribe_audio(
     file: UploadFile = File(...),
-    language: str = Query(..., enum=list(singleton_manager.get_asr_manager().model_language.keys())),
+    language: str = Query(..., enum=get_asr_languages),
     asr_manager: ASRModelManager = Depends(get_asr_manager)
 ):
-    async with request_queue:
-        if not asr_manager.model:
-            raise HTTPException(status_code=503, detail="ASR model not loaded")
-        try:
-            wav, sr = torchaudio.load(file.file, backend="cuda" if cuda_available else "cpu")
-            wav = torch.mean(wav, dim=0, keepdim=True).to(device)
-            target_sample_rate = 16000
-            if sr != target_sample_rate:
-                resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sample_rate).to(device)
-                wav = resampler(wav)
-            with autocast(), torch.no_grad():
-                transcription_rnnt = asr_manager.model(wav, asr_manager.model_language[language], "rnnt")
-            if asr_manager.device_type.type == "cuda":
-                torch.cuda.empty_cache()  # Clear cache after inference
-            return TranscriptionResponse(text=transcription_rnnt)
-        except Exception as e:
-            logger.error(f"Error in transcription: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+    if not asr_manager.model:
+        raise HTTPException(status_code=503, detail="ASR model not loaded")
+    try:
+        wav, sr = torchaudio.load(file.file, backend="cuda" if cuda_available else "cpu")
+        wav = torch.mean(wav, dim=0, keepdim=True).to(device)
+        target_sample_rate = 16000
+        if sr != target_sample_rate:
+            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sample_rate).to(device)
+            wav = resampler(wav)
+        with autocast(), torch.no_grad():
+            transcription_rnnt = asr_manager.model(wav, asr_manager.model_language[language], "rnnt")
+        if asr_manager.device_type.type == "cuda":
+            torch.cuda.empty_cache()
+        return TranscriptionResponse(text=transcription_rnnt)
+    except Exception as e:
+        logger.error(f"Error in transcription: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 @app.post("/v1/speech_to_speech")
 async def speech_to_speech(
     request: Request,
     file: UploadFile = File(...),
-    language: str = Query(..., enum=list(singleton_manager.get_asr_manager().model_language.keys())),
+    language: str = Query(..., enum=get_asr_languages),
     asr_manager: ASRModelManager = Depends(get_asr_manager),
     llm_manager: LLMManager = Depends(get_llm_manager),
     tts_manager: TTSManager = Depends(get_tts_manager)
 ):
-    async with request_queue:
-        if not tts_manager.model:
-            raise HTTPException(status_code=503, detail="TTS model not loaded")
-        transcription = await transcribe_audio(file, language, asr_manager)
-        logger.info(f"Transcribed text: {transcription.text}")
-        chat_request = ChatRequest(prompt=transcription.text, src_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda"), tgt_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda"))
-        processed_text = await chat(request, chat_request, llm_manager)
-        logger.info(f"Processed text: {processed_text.response}")
-        voice_request = KannadaSynthesizeRequest(text=processed_text.response)
-        audio_response = await synthesize_kannada(voice_request, tts_manager)
-        return audio_response
+    if not tts_manager.model:
+        raise HTTPException(status_code=503, detail="TTS model not loaded")
+    transcription = await transcribe_audio(file, language, asr_manager)
+    logger.info(f"Transcribed text: {transcription.text}")
+    chat_request = ChatRequest(prompt=transcription.text, src_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda"), tgt_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda"))
+    processed_text = await chat(request, chat_request, llm_manager)
+    logger.info(f"Processed text: {processed_text.response}")
+    voice_request = KannadaSynthesizeRequest(text=processed_text.response)
+    audio_response = await synthesize_kannada(voice_request, tts_manager)
+    return audio_response
 
 LANGUAGE_TO_SCRIPT = {"kannada": "kan_Knda"}
 
@@ -1005,17 +1002,14 @@ if __name__ == "__main__":
     settings.chat_rate_limit = global_settings["chat_rate_limit"]
     settings.speech_rate_limit = global_settings["speech_rate_limit"]
 
-    # Initialize singleton with models
     singleton_manager.initialize_models(settings.llm_model_name, device)
 
     if selected_config["components"]["ASR"]:
         singleton_manager.get_asr_manager().model_language[selected_config["language"]] = selected_config["components"]["ASR"]["language_code"]
     if selected_config["components"]["Translation"]:
-        global translation_configs
         translation_configs.extend(selected_config["components"]["Translation"])
 
     host = args.host if args.host != settings.host else settings.host
     port = args.port if args.port != settings.port else settings.port
 
-    # Run Uvicorn with 2 workers
     uvicorn.run("main:app", host=host, port=port, workers=2, log_level="debug")
