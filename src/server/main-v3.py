@@ -23,6 +23,7 @@ import soundfile as sf
 import numpy as np
 import requests
 import logging
+import threading
 from starlette.responses import StreamingResponse
 from logging_config import logger  # Assumed external logging config
 from tts_config import SPEED, ResponseFormat, config as tts_config  # Assumed external TTS config
@@ -42,10 +43,10 @@ if cuda_available:
     device_idx = torch.cuda.current_device()
     capability = torch.cuda.get_device_capability(device_idx)
     compute_capability_float = float(f"{capability[0]}.{capability[1]}")
-    print(f"CUDA version: {cuda_version}")
-    print(f"CUDA Compute Capability: {compute_capability_float}")
+    logger.info(f"CUDA version: {cuda_version}")
+    logger.info(f"CUDA Compute Capability: {compute_capability_float}")
 else:
-    print("CUDA is not available on this system.")
+    logger.info("CUDA is not available on this system.")
 
 # Settings
 class Settings(BaseSettings):
@@ -76,10 +77,77 @@ quantization_config = BitsAndBytesConfig(
 )
 
 # Request queue for concurrency control
-request_queue = asyncio.Queue(maxsize=10)
+request_queue = asyncio.Queue(maxsize=20)  # Increased to handle more concurrent requests
 
 # Logging optimization
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+
+# Singleton Model Manager
+class SingletonModelManager:
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance.initialized = False
+            return cls._instance
+
+    def __init__(self):
+        if not self.initialized:
+            with self._lock:
+                if not self.initialized:  # Double-checked locking
+                    self.llm_manager = None
+                    self.tts_manager = None
+                    self.asr_manager = None
+                    self.model_manager = None
+                    self.initialized = True
+                    self.logger = logging.getLogger("indic_all_server")
+
+    def initialize_models(self, llm_model_name: str, device: str = "cuda:0"):
+        """Load all models in the parent process."""
+        with self._lock:
+            if self.llm_manager is None:
+                self.logger.info("Initializing LLMManager...")
+                self.llm_manager = LLMManager(llm_model_name, device)
+                self.llm_manager.load()
+                self.logger.info(f"GPU memory after LLM: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            if self.tts_manager is None:
+                self.logger.info("Initializing TTSManager...")
+                self.tts_manager = TTSManager(device)
+                self.tts_manager.load()
+                self.logger.info(f"GPU memory after TTS: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            if self.asr_manager is None:
+                self.logger.info("Initializing ASRModelManager...")
+                self.asr_manager = ASRModelManager(device)
+                self.asr_manager.load()
+                self.logger.info(f"GPU memory after ASR: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            if self.model_manager is None:
+                self.logger.info("Initializing ModelManager...")
+                self.model_manager = ModelManager(device, use_distilled=True, is_lazy_loading=True)
+                # Preload translation models
+                translation_tasks = [
+                    ('eng_Latn', 'kan_Knda', 'eng_indic'),
+                    ('kan_Knda', 'eng_Latn', 'indic_eng'),
+                    ('kan_Knda', 'hin_Deva', 'indic_indic'),
+                ]
+                for src_lang, tgt_lang, key in translation_tasks:
+                    self.model_manager.load_model(src_lang, tgt_lang, key)
+                self.logger.info(f"GPU memory after translation models: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            self.logger.info("All models initialized")
+
+    def get_llm_manager(self) -> 'LLMManager':
+        return self.llm_manager
+
+    def get_tts_manager(self) -> 'TTSManager':
+        return self.tts_manager
+
+    def get_asr_manager(self) -> 'ASRModelManager':
+        return self.asr_manager
+
+    def get_model_manager(self) -> 'ModelManager':
+        return self.model_manager
 
 # LLM Manager with batching
 class LLMManager:
@@ -91,31 +159,32 @@ class LLMManager:
         self.processor = None
         self.is_loaded = False
         self.token_cache = {}
-        self.load()
-        logger.info(f"LLMManager initialized with model {model_name} on {self.device}")
+        self.logger = logging.getLogger("indic_all_server")
 
     def load(self):
-        if not self.is_loaded:
-            try:
-                if self.device.type == "cuda":
-                    torch.set_float32_matmul_precision('high')
-                    logger.info("Enabled TF32 matrix multiplication for improved GPU performance")
-                self.model = Gemma3ForConditionalGeneration.from_pretrained(
-                    self.model_name,
-                    device_map="auto",
-                    quantization_config=quantization_config,
-                    torch_dtype=self.torch_dtype
-                )
-                if self.model is None:
-                    raise ValueError(f"Failed to load model {self.model_name}: Model object is None")
-                self.model.eval()
-                self.processor = AutoProcessor.from_pretrained(self.model_name, use_fast=True)
-                self.is_loaded = True
-                logger.info(f"LLM {self.model_name} loaded and warmed up on {self.device}")
-            except Exception as e:
-                logger.error(f"Failed to load LLM: {str(e)}")
-                self.is_loaded = False
-                raise  # Re-raise to ensure failure is caught upstream
+        if self.is_loaded:
+            self.logger.info(f"LLM {self.model_name} already loaded")
+            return
+        try:
+            if self.device.type == "cuda":
+                torch.set_float32_matmul_precision('high')
+                self.logger.info("Enabled TF32 matrix multiplication for improved GPU performance")
+            self.model = Gemma3ForConditionalGeneration.from_pretrained(
+                self.model_name,
+                device_map="auto",
+                quantization_config=quantization_config,
+                torch_dtype=self.torch_dtype
+            )
+            if self.model is None:
+                raise ValueError(f"Failed to load model {self.model_name}: Model object is None")
+            self.model.eval()
+            self.processor = AutoProcessor.from_pretrained(self.model_name, use_fast=True)
+            self.is_loaded = True
+            self.logger.info(f"LLM {self.model_name} loaded and warmed up on {self.device}")
+        except Exception as e:
+            self.logger.error(f"Failed to load LLM: {str(e)}", exc_info=True)
+            self.is_loaded = False
+            raise
 
     def unload(self):
         if self.is_loaded:
@@ -123,31 +192,42 @@ class LLMManager:
             del self.processor
             if self.device.type == "cuda":
                 torch.cuda.empty_cache()
-                logger.info(f"GPU memory cleared: {torch.cuda.memory_allocated()} bytes allocated")
+                self.logger.info(f"GPU memory cleared: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
             self.is_loaded = False
             self.token_cache.clear()
-            logger.info(f"LLM {self.model_name} unloaded")
+            self.logger.info(f"LLM {self.model_name} unloaded")
 
     async def generate(self, prompt: str, max_tokens: int = settings.max_tokens, temperature: float = 0.7) -> str:
         if not self.is_loaded:
-            logger.warning("LLM not loaded; attempting reload")
+            self.logger.warning("LLM not loaded; attempting reload")
             self.load()
         if not self.is_loaded:
             raise HTTPException(status_code=503, detail="LLM model unavailable")
 
         cache_key = f"{prompt}:{max_tokens}:{temperature}"
         if cache_key in self.token_cache:
-            logger.info("Using cached response")
+            self.logger.info("Using cached response")
             return self.token_cache[cache_key]
 
         future = asyncio.Future()
         await request_queue.put({"prompt": prompt, "max_tokens": max_tokens, "temperature": temperature, "future": future})
         response = await future
         self.token_cache[cache_key] = response
-        logger.info(f"Generated response: {response}")
+        self.logger.info(f"Generated response: {response[:50]}...")
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()  # Clear cache after inference
         return response
 
     async def batch_generate(self, prompts: List[Dict]) -> List[str]:
+        batch_size = 2  # Reduced to conserve memory
+        responses = []
+        for i in range(0, len(prompts), batch_size):
+            batch_prompts = prompts[i:i + batch_size]
+            batch_responses = await self._process_batch(batch_prompts)
+            responses.extend(batch_responses)
+        return responses
+
+    async def _process_batch(self, prompts: List[Dict]) -> List[str]:
         messages_batch = [
             [
                 {"role": "system", "content": [{"type": "text", "text": "You are Dhwani, a helpful assistant. Answer questions considering India as base country and Karnataka as base state. Provide a concise response in one sentence maximum."}]},
@@ -176,10 +256,12 @@ class LLMManager:
                 self.processor.decode(output[input_len:], skip_special_tokens=True)
                 for output, input_len in zip(outputs, inputs_vlm["input_ids"].shape[1])
             ]
-            logger.info(f"Batch generated {len(responses)} responses")
+            self.logger.info(f"Batch generated {len(responses)} responses")
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()  # Clear cache after inference
             return responses
         except Exception as e:
-            logger.error(f"Error in batch generation: {str(e)}")
+            self.logger.error(f"Error in batch generation: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Batch generation failed: {str(e)}")
 
     async def vision_query(self, image: Image.Image, query: str) -> str:
@@ -198,14 +280,16 @@ class LLMManager:
                 return_tensors="pt"
             ).to(self.device, dtype=torch.bfloat16)
         except Exception as e:
-            logger.error(f"Error in apply_chat_template: {str(e)}")
+            self.logger.error(f"Error in apply_chat_template: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to process input: {str(e)}")
         input_len = inputs_vlm["input_ids"].shape[-1]
         with torch.inference_mode():
             generation = self.model.generate(**inputs_vlm, max_new_tokens=512, do_sample=True, temperature=0.7)
             generation = generation[0][input_len:]
         decoded = self.processor.decode(generation, skip_special_tokens=True)
-        logger.info(f"Vision query response: {decoded}")
+        self.logger.info(f"Vision query response: {decoded[:50]}...")
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()  # Clear cache after inference
         return decoded
 
     async def chat_v2(self, image: Image.Image, query: str) -> str:
@@ -224,14 +308,16 @@ class LLMManager:
                 return_tensors="pt"
             ).to(self.device, dtype=torch.bfloat16)
         except Exception as e:
-            logger.error(f"Error in apply_chat_template: {str(e)}")
+            self.logger.error(f"Error in apply_chat_template: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to process input: {str(e)}")
         input_len = inputs_vlm["input_ids"].shape[-1]
         with torch.inference_mode():
             generation = self.model.generate(**inputs_vlm, max_new_tokens=512, do_sample=True, temperature=0.7)
             generation = generation[0][input_len:]
         decoded = self.processor.decode(generation, skip_special_tokens=True)
-        logger.info(f"Chat_v2 response: {decoded}")
+        self.logger.info(f"Chat_v2 response: {decoded[:50]}...")
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()  # Clear cache after inference
         return decoded
 
 # TTS Manager
@@ -240,28 +326,33 @@ class TTSManager:
         self.device_type = torch.device(device_type)
         self.model = None
         self.repo_id = "ai4bharat/IndicF5"
-        self.load()
+        self.logger = logging.getLogger("indic_all_server")
 
     def load(self):
-        if not self.model:
-            logger.info(f"Loading TTS model {self.repo_id} on {self.device_type}...")
-            self.model = AutoModel.from_pretrained(self.repo_id, trust_remote_code=True).to(self.device_type)
-            logger.info("TTS model loaded")
+        if self.model:
+            self.logger.info(f"TTS model {self.repo_id} already loaded")
+            return
+        self.logger.info(f"Loading TTS model {self.repo_id} on {self.device_type}...")
+        self.model = AutoModel.from_pretrained(self.repo_id, trust_remote_code=True).to(self.device_type)
+        self.logger.info("TTS model loaded")
 
     def unload(self):
         if self.model:
             del self.model
             if self.device_type.type == "cuda":
                 torch.cuda.empty_cache()
-                logger.info(f"TTS GPU memory cleared: {torch.cuda.memory_allocated()} bytes allocated")
+                self.logger.info(f"TTS GPU memory cleared: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
             self.model = None
-            logger.info("TTS model unloaded")
+            self.logger.info("TTS model unloaded")
 
     def synthesize(self, text, ref_audio_path, ref_text):
         if not self.model:
             raise ValueError("TTS model not loaded")
         with autocast():
-            return self.model(text, ref_audio_path=ref_audio_path, ref_text=ref_text)
+            audio = self.model(text, ref_audio_path=ref_audio_path, ref_text=ref_text)
+            if self.device_type.type == "cuda":
+                torch.cuda.empty_cache()  # Clear cache after inference
+            return audio
 
 # Translation Manager
 class TranslateManager:
@@ -272,27 +363,42 @@ class TranslateManager:
         self.src_lang = src_lang
         self.tgt_lang = tgt_lang
         self.use_distilled = use_distilled
+        self.logger = logging.getLogger("indic_all_server")
         self.load()
 
     def load(self):
-        if not self.tokenizer or not self.model:
-            if self.src_lang.startswith("eng") and not self.tgt_lang.startswith("eng"):
-                model_name = "ai4bharat/indictrans2-en-indic-dist-200M" if self.use_distilled else "ai4bharat/indictrans2-en-indic-1B"
-            elif not self.src_lang.startswith("eng") and self.tgt_lang.startswith("eng"):
-                model_name = "ai4bharat/indictrans2-indic-en-dist-200M" if self.use_distilled else "ai4bharat/indictrans2-indic-en-1B"
-            elif not self.src_lang.startswith("eng") and not self.tgt_lang.startswith("eng"):
-                model_name = "ai4bharat/indictrans2-indic-indic-dist-320M" if self.use_distilled else "ai4bharat/indictrans2-indic-indic-1B"
-            else:
-                raise ValueError("Invalid language combination")
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-            self.model = AutoModelForSeq2SeqLM.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                torch_dtype=torch.float16,
-                attn_implementation="flash_attention_2"
-            ).to(self.device_type)
-            self.model = torch.compile(self.model, mode="reduce-overhead")
-            logger.info(f"Translation model {model_name} loaded")
+        if self.tokenizer and self.model:
+            self.logger.info(f"Translation model for {self.src_lang}->{self.tgt_lang} already loaded")
+            return
+        if self.src_lang.startswith("eng") and not self.tgt_lang.startswith("eng"):
+            model_name = "ai4bharat/indictrans2-en-indic-dist-200M" if self.use_distilled else "ai4bharat/indictrans2-en-indic-1B"
+        elif not self.src_lang.startswith("eng") and self.tgt_lang.startswith("eng"):
+            model_name = "ai4bharat/indictrans2-indic-en-dist-200M" if self.use_distilled else "ai4bharat/indictrans2-indic-en-1B"
+        elif not self.src_lang.startswith("eng") and not self.tgt_lang.startswith("eng"):
+            model_name = "ai4bharat/indictrans2-indic-indic-dist-320M" if self.use_distilled else "ai4bharat/indictrans2-indic-indic-1B"
+        else:
+            raise ValueError("Invalid language combination")
+        self.logger.info(f"Loading translation model {model_name} on {self.device_type}...")
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            attn_implementation="flash_attention_2"
+        ).to(self.device_type)
+        self.model = torch.compile(self.model, mode="reduce-overhead")
+        self.logger.info(f"Translation model {model_name} loaded")
+
+    def unload(self):
+        if self.model:
+            del self.model
+            del self.tokenizer
+            if self.device_type.type == "cuda":
+                torch.cuda.empty_cache()
+                self.logger.info(f"Translation GPU memory cleared: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            self.model = None
+            self.tokenizer = None
+            self.logger.info(f"Translation model for {self.src_lang}->{self.tgt_lang} unloaded")
 
 # Model Manager
 class ModelManager:
@@ -301,12 +407,13 @@ class ModelManager:
         self.device_type = device_type
         self.use_distilled = use_distilled
         self.is_lazy_loading = is_lazy_loading
+        self.logger = logging.getLogger("indic_all_server")
 
     def load_model(self, src_lang, tgt_lang, key):
-        logger.info(f"Loading translation model for {src_lang} -> {tgt_lang}")
+        self.logger.info(f"Loading translation model for {src_lang} -> {tgt_lang}")
         translate_manager = TranslateManager(src_lang, tgt_lang, self.device_type, self.use_distilled)
         self.models[key] = translate_manager
-        logger.info(f"Loaded translation model for {key}")
+        self.logger.info(f"Loaded translation model for {key}")
 
     def get_model(self, src_lang, tgt_lang):
         key = self._get_model_key(src_lang, tgt_lang)
@@ -329,38 +436,43 @@ class ASRModelManager:
         self.device_type = torch.device(device_type)
         self.model = None
         self.model_language = {"kannada": "kn"}
-        self.load()
+        self.logger = logging.getLogger("indic_all_server")
 
     def load(self):
-        if not self.model:
-            logger.info(f"Loading ASR model on {self.device_type}...")
-            self.model = AutoModel.from_pretrained(
-                "ai4bharat/indic-conformer-600m-multilingual",
-                trust_remote_code=True
-            ).to(self.device_type)
-            logger.info("ASR model loaded")
+        if self.model:
+            self.logger.info("ASR model already loaded")
+            return
+        self.logger.info(f"Loading ASR model on {self.device_type}...")
+        import onnxruntime as ort
+        providers = ort.get_available_providers()
+        self.logger.info(f"ONNX Runtime providers: {providers}")
+        if "CUDAExecutionProvider" not in providers and self.device_type.type == "cuda":
+            self.logger.warning("CUDAExecutionProvider not available, falling back to CPU")
+            self.device_type = torch.device("cpu")
+        self.model = AutoModel.from_pretrained(
+            "ai4bharat/indic-conformer-600m-multilingual",
+            trust_remote_code=True
+        ).to(self.device_type)
+        self.logger.info("ASR model loaded")
 
     def unload(self):
         if self.model:
             del self.model
             if self.device_type.type == "cuda":
                 torch.cuda.empty_cache()
-                logger.info(f"ASR GPU memory cleared: {torch.cuda.memory_allocated()} bytes allocated")
+                self.logger.info(f"ASR GPU memory cleared: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
             self.model = None
-            logger.info("ASR model unloaded")
+            self.logger.info("ASR model unloaded")
 
-# Global Managers
-llm_manager = LLMManager(settings.llm_model_name)
-model_manager = ModelManager()
-asr_manager = ASRModelManager()
-tts_manager = TTSManager()
+# Initialize singleton
+singleton_manager = SingletonModelManager()
 ip = IndicProcessor(inference=True)
 
 # TTS Constants
 EXAMPLES = [
     {
         "audio_name": "KAN_F (Happy)",
-        "audio_url": "https://github.com/AI4Bharat/IndicF5/raw/refs/heads/main/prompts/KAN_F_HAPPY_00001.wav",
+        "audio_url": "https://github.com/AI4bharat/IndicF5/raw/refs/heads/main/prompts/KAN_F_HAPPY_00001.wav",
         "ref_text": "ನಮ್‌ ಫ್ರಿಜ್ಜಲ್ಲಿ ಕೂಲಿಂಗ್‌ ಸಮಸ್ಯೆ ಆಗಿ ನಾನ್‌ ಭಾಳ ದಿನದಿಂದ ಒದ್ದಾಡ್ತಿದ್ದೆ, ಆದ್ರೆ ಅದ್ನೀಗ ಮೆಕಾನಿಕ್ ಆಗಿರೋ ನಿಮ್‌ ಸಹಾಯ್ದಿಂದ ಬಗೆಹರಿಸ್ಕೋಬೋದು ಅಂತಾಗಿ ನಿರಾಳ ಆಯ್ತು ನಂಗೆ।",
         "synth_text": "ಚೆನ್ನೈನ ಶೇರ್ ಆಟೋ ಪ್ರಯಾಣಿಕರ ನಡುವೆ ಆಹಾರವನ್ನು ಹಂಚಿಕೊಂಡು ತಿನ್ನುವುದು ನನಗೆ ಮನಸ್ಸಿಗೆ ತುಂಬಾ ಒಳ್ಳೆಯದೆನಿಸುವ ವಿಷಯ."
     },
@@ -455,19 +567,28 @@ SUPPORTED_LANGUAGES = {
     "por_Latn", "rus_Cyrl", "pol_Latn"
 }
 
-# Dependency
+# Dependencies
+def get_llm_manager():
+    return singleton_manager.get_llm_manager()
+
+def get_tts_manager():
+    return singleton_manager.get_tts_manager()
+
+def get_asr_manager():
+    return singleton_manager.get_asr_manager()
+
 def get_translate_manager(src_lang: str, tgt_lang: str) -> TranslateManager:
-    return model_manager.get_model(src_lang, tgt_lang)
+    return singleton_manager.get_model_manager().get_model(src_lang, tgt_lang)
 
 # Translation Function
 async def perform_internal_translation(sentences: List[str], src_lang: str, tgt_lang: str) -> List[str]:
     try:
-        translate_manager = model_manager.get_model(src_lang, tgt_lang)
+        translate_manager = singleton_manager.get_model_manager().get_model(src_lang, tgt_lang)
     except ValueError as e:
         logger.info(f"Model not preloaded: {str(e)}, loading now...")
-        key = model_manager._get_model_key(src_lang, tgt_lang)
-        model_manager.load_model(src_lang, tgt_lang, key)
-        translate_manager = model_manager.get_model(src_lang, tgt_lang)
+        key = singleton_manager.get_model_manager()._get_model_key(src_lang, tgt_lang)
+        singleton_manager.get_model_manager().load_model(src_lang, tgt_lang, key)
+        translate_manager = singleton_manager.get_model_manager().get_model(src_lang, tgt_lang)
 
     batch = ip.preprocess_batch(sentences, src_lang=src_lang, tgt_lang=tgt_lang)
     inputs = translate_manager.tokenizer(batch, truncation=True, padding="longest", return_tensors="pt", return_attention_mask=True).to(translate_manager.device_type)
@@ -475,44 +596,26 @@ async def perform_internal_translation(sentences: List[str], src_lang: str, tgt_
         generated_tokens = translate_manager.model.generate(**inputs, use_cache=True, min_length=0, max_length=256, num_beams=5, num_return_sequences=1)
     with translate_manager.tokenizer.as_target_tokenizer():
         generated_tokens = translate_manager.tokenizer.batch_decode(generated_tokens.detach().cpu().tolist(), skip_special_tokens=True, clean_up_tokenization_spaces=True)
-    return ip.postprocess_batch(generated_tokens, lang=tgt_lang)
+    translations = ip.postprocess_batch(generated_tokens, lang=tgt_lang)
+    if translate_manager.device_type.type == "cuda":
+        torch.cuda.empty_cache()  # Clear cache after inference
+    return translations
 
 # Lifespan Event Handler
 translation_configs = []
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    def load_all_models():
-        logger.info("Loading LLM model...")
-        llm_manager.load()
-        logger.info("Loading TTS model...")
-        tts_manager.load()
-        logger.info("Loading ASR model...")
-        asr_manager.load()
-        translation_tasks = [
-            ('eng_Latn', 'kan_Knda', 'eng_indic'),
-            ('kan_Knda', 'eng_Latn', 'indic_eng'),
-            ('kan_Knda', 'hin_Deva', 'indic_indic'),
-        ]
-        for config in translation_configs:
-            src_lang = config["src_lang"]
-            tgt_lang = config["tgt_lang"]
-            key = model_manager._get_model_key(src_lang, tgt_lang)
-            translation_tasks.append((src_lang, tgt_lang, key))
-        for src_lang, tgt_lang, key in translation_tasks:
-            logger.info(f"Loading translation model for {src_lang} -> {tgt_lang}...")
-            model_manager.load_model(src_lang, tgt_lang, key)
-        logger.info("All models loaded successfully")
-
     logger.info("Starting server with preloaded models...")
-    load_all_models()
+    singleton_manager.initialize_models(settings.llm_model_name, device)
     batch_task = asyncio.create_task(batch_worker())
     yield
     batch_task.cancel()
-    llm_manager.unload()
-    tts_manager.unload()
-    asr_manager.unload()
-    for model in model_manager.models.values():
+    logger.info("Unloading all models...")
+    singleton_manager.get_llm_manager().unload()
+    singleton_manager.get_tts_manager().unload()
+    singleton_manager.get_asr_manager().unload()
+    for model in singleton_manager.get_model_manager().models.values():
         model.unload()
     logger.info("Server shutdown complete; all models unloaded")
 
@@ -536,13 +639,13 @@ async def batch_worker():
                     continue
             if batch:
                 start_time = time()
-                responses = await llm_manager.batch_generate(batch)
+                responses = await singleton_manager.get_llm_manager().batch_generate(batch)
                 duration = time() - start_time
                 logger.info(f"Batch of {len(batch)} requests processed in {duration:.3f} seconds")
                 for request, response in zip(batch, responses):
                     request["future"].set_result(response)
         except Exception as e:
-            logger.error(f"Batch worker error: {str(e)}")
+            logger.error(f"Batch worker error: {str(e)}", exc_info=True)
             for request in batch:
                 request["future"].set_exception(e)
 
@@ -576,8 +679,8 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 
 # Endpoints
-@app.post("/v1/audio/speech", response_class=StreamingResponse)
-async def synthesize_kannada(request: KannadaSynthesizeRequest):
+@app.post("/audio/speech", response_class=StreamingResponse)
+async def synthesize_kannada(request: KannadaSynthesizeRequest, tts_manager: TTSManager = Depends(get_tts_manager)):
     if not tts_manager.model:
         raise HTTPException(status_code=503, detail="TTS model not loaded")
     kannada_example = next(ex for ex in EXAMPLES if ex["audio_name"] == "KAN_F (Happy)")
@@ -590,7 +693,7 @@ async def synthesize_kannada(request: KannadaSynthesizeRequest):
         headers={"Content-Disposition": "attachment; filename=synthesized_kannada_speech.wav"}
     )
 
-@app.post("/v1/translate", response_model=TranslationResponse)
+@app.post("/translate", response_model=TranslationResponse)
 async def translate(request: TranslationRequest, translate_manager: TranslateManager = Depends(get_translate_manager)):
     if not request.sentences:
         raise HTTPException(status_code=400, detail="Input sentences are required")
@@ -601,6 +704,8 @@ async def translate(request: TranslationRequest, translate_manager: TranslateMan
     with translate_manager.tokenizer.as_target_tokenizer():
         generated_tokens = translate_manager.tokenizer.batch_decode(generated_tokens.detach().cpu().tolist(), skip_special_tokens=True, clean_up_tokenization_spaces=True)
     translations = ip.postprocess_batch(generated_tokens, lang=request.tgt_lang)
+    if translate_manager.device_type.type == "cuda":
+        torch.cuda.empty_cache()  # Clear cache after inference
     return TranslationResponse(translations=translations)
 
 @app.get("/v1/health")
@@ -610,6 +715,7 @@ async def health_check():
         logger.warning("GPU memory usage exceeds 90%; consider unloading models")
     llm_status = "unhealthy"
     llm_latency = None
+    llm_manager = singleton_manager.get_llm_manager()
     if llm_manager.is_loaded:
         start = time()
         try:
@@ -617,9 +723,10 @@ async def health_check():
             llm_latency = time() - start
             llm_status = "healthy" if llm_test else "unhealthy"
         except Exception as e:
-            logger.error(f"LLM health check failed: {str(e)}")
+            logger.error(f"LLM health check failed: {str(e)}", exc_info=True)
     tts_status = "unhealthy"
     tts_latency = None
+    tts_manager = singleton_manager.get_tts_manager()
     if tts_manager.model:
         start = time()
         try:
@@ -627,9 +734,10 @@ async def health_check():
             tts_latency = time() - start
             tts_status = "healthy" if audio_buffer else "unhealthy"
         except Exception as e:
-            logger.error(f"TTS health check failed: {str(e)}")
+            logger.error(f"TTS health check failed: {str(e)}", exc_info=True)
     asr_status = "unhealthy"
     asr_latency = None
+    asr_manager = singleton_manager.get_asr_manager()
     if asr_manager.model:
         start = time()
         try:
@@ -640,7 +748,7 @@ async def health_check():
             asr_latency = time() - start
             asr_status = "healthy" if asr_test else "unhealthy"
         except Exception as e:
-            logger.error(f"ASR health check failed: {str(e)}")
+            logger.error(f"ASR health check failed: {str(e)}", exc_info=True)
     status = {
         "status": "healthy" if llm_status == "healthy" and tts_status == "healthy" and asr_status == "healthy" else "degraded",
         "model": settings.llm_model_name,
@@ -650,7 +758,7 @@ async def health_check():
         "tts_latency": f"{tts_latency:.3f}s" if tts_latency else "N/A",
         "asr_status": asr_status,
         "asr_latency": f"{asr_latency:.3f}s" if asr_latency else "N/A",
-        "translation_models": list(model_manager.models.keys()),
+        "translation_models": list(singleton_manager.get_model_manager().models.keys()),
         "gpu_memory_usage": f"{memory_usage:.2%}"
     }
     logger.info("Health check completed")
@@ -664,35 +772,26 @@ async def home():
 async def unload_all_models():
     try:
         logger.info("Starting to unload all models...")
-        llm_manager.unload()
-        tts_manager.unload()
-        asr_manager.unload()
-        for model in model_manager.models.values():
+        singleton_manager.get_llm_manager().unload()
+        singleton_manager.get_tts_manager().unload()
+        singleton_manager.get_asr_manager().unload()
+        for model in singleton_manager.get_model_manager().models.values():
             model.unload()
         logger.info("All models unloaded successfully")
         return {"status": "success", "message": "All models unloaded"}
     except Exception as e:
-        logger.error(f"Error unloading models: {str(e)}")
+        logger.error(f"Error unloading models: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to unload models: {str(e)}")
 
 @app.post("/v1/load_all_models")
 async def load_all_models():
     try:
         logger.info("Starting to load all models...")
-        llm_manager.load()
-        tts_manager.load()
-        asr_manager.load()
-        for src_lang, tgt_lang, key in [
-            ('eng_Latn', 'kan_Knda', 'eng_indic'),
-            ('kan_Knda', 'eng_Latn', 'indic_eng'),
-            ('kan_Knda', 'hin_Deva', 'indic_indic'),
-        ]:
-            if key not in model_manager.models:
-                model_manager.load_model(src_lang, tgt_lang, key)
+        singleton_manager.initialize_models(settings.llm_model_name, device)
         logger.info("All models loaded successfully")
         return {"status": "success", "message": "All models loaded"}
     except Exception as e:
-        logger.error(f"Error loading models: {str(e)}")
+        logger.error(f"Error loading models: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to load models: {str(e)}")
 
 @app.post("/v1/translate", response_model=TranslationResponse)
@@ -703,12 +802,12 @@ async def translate_endpoint(request: TranslationRequest):
         logger.info(f"Translation successful: {translations}")
         return TranslationResponse(translations=translations)
     except Exception as e:
-        logger.error(f"Unexpected error during translation: {str(e)}")
+        logger.error(f"Unexpected error during translation: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
 
 @app.post("/v1/chat", response_model=ChatResponse)
 @limiter.limit(settings.chat_rate_limit)
-async def chat(request: Request, chat_request: ChatRequest):
+async def chat(request: Request, chat_request: ChatRequest, llm_manager: LLMManager = Depends(get_llm_manager)):
     async with request_queue:
         if not chat_request.prompt:
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
@@ -733,7 +832,7 @@ async def chat(request: Request, chat_request: ChatRequest):
                 logger.info(f"Response in {chat_request.tgt_lang}, no translation needed")
             return ChatResponse(response=final_response)
         except Exception as e:
-            logger.error(f"Error processing request: {str(e)}")
+            logger.error(f"Error processing request: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 @app.post("/v1/visual_query/")
@@ -742,6 +841,7 @@ async def visual_query(
     query: str = Body(...),
     src_lang: str = Query("kan_Knda", enum=list(SUPPORTED_LANGUAGES)),
     tgt_lang: str = Query("kan_Knda", enum=list(SUPPORTED_LANGUAGES)),
+    llm_manager: LLMManager = Depends(get_llm_manager)
 ):
     async with request_queue:
         try:
@@ -766,7 +866,7 @@ async def visual_query(
                 logger.info("Answer kept in English, no translation needed")
             return {"answer": final_answer}
         except Exception as e:
-            logger.error(f"Error processing request: {str(e)}")
+            logger.error(f"Error processing request: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 @app.post("/v1/chat_v2", response_model=ChatResponse)
@@ -777,6 +877,7 @@ async def chat_v2(
     image: UploadFile = File(default=None),
     src_lang: str = Form("kan_Knda"),
     tgt_lang: str = Form("kan_Knda"),
+    llm_manager: LLMManager = Depends(get_llm_manager)
 ):
     async with request_queue:
         if not prompt:
@@ -821,11 +922,15 @@ async def chat_v2(
                     final_response = decoded
             return ChatResponse(response=final_response)
         except Exception as e:
-            logger.error(f"Error processing request: {str(e)}")
+            logger.error(f"Error processing request: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
-@app.post("/v1/transcribe/", response_model=TranscriptionResponse)
-async def transcribe_audio(file: UploadFile = File(...), language: str = Query(..., enum=list(asr_manager.model_language.keys()))):
+@app.post("/transcribe/", response_model=TranscriptionResponse)
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    language: str = Query(..., enum=list(singleton_manager.get_asr_manager().model_language.keys())),
+    asr_manager: ASRModelManager = Depends(get_asr_manager)
+):
     async with request_queue:
         if not asr_manager.model:
             raise HTTPException(status_code=503, detail="ASR model not loaded")
@@ -838,27 +943,32 @@ async def transcribe_audio(file: UploadFile = File(...), language: str = Query(.
                 wav = resampler(wav)
             with autocast(), torch.no_grad():
                 transcription_rnnt = asr_manager.model(wav, asr_manager.model_language[language], "rnnt")
+            if asr_manager.device_type.type == "cuda":
+                torch.cuda.empty_cache()  # Clear cache after inference
             return TranscriptionResponse(text=transcription_rnnt)
         except Exception as e:
-            logger.error(f"Error in transcription: {str(e)}")
+            logger.error(f"Error in transcription: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 @app.post("/v1/speech_to_speech")
 async def speech_to_speech(
     request: Request,
     file: UploadFile = File(...),
-    language: str = Query(..., enum=list(asr_manager.model_language.keys())),
-) -> StreamingResponse:
+    language: str = Query(..., enum=list(singleton_manager.get_asr_manager().model_language.keys())),
+    asr_manager: ASRModelManager = Depends(get_asr_manager),
+    llm_manager: LLMManager = Depends(get_llm_manager),
+    tts_manager: TTSManager = Depends(get_tts_manager)
+):
     async with request_queue:
         if not tts_manager.model:
             raise HTTPException(status_code=503, detail="TTS model not loaded")
-        transcription = await transcribe_audio(file, language)
+        transcription = await transcribe_audio(file, language, asr_manager)
         logger.info(f"Transcribed text: {transcription.text}")
         chat_request = ChatRequest(prompt=transcription.text, src_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda"), tgt_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda"))
-        processed_text = await chat(request, chat_request)
+        processed_text = await chat(request, chat_request, llm_manager)
         logger.info(f"Processed text: {processed_text.response}")
         voice_request = KannadaSynthesizeRequest(text=processed_text.response)
-        audio_response = await synthesize_kannada(voice_request)
+        audio_response = await synthesize_kannada(voice_request, tts_manager)
         return audio_response
 
 LANGUAGE_TO_SCRIPT = {"kannada": "kan_Knda"}
@@ -871,8 +981,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     def load_config(config_path="dhwani_config.json"):
-        with open(config_path, "r") as f:
-            return json.load(f)
+        try:
+            with open(config_path, "r") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            logger.error(f"Configuration file {config_path} not found")
+            raise
+        except json.JSONDecodeError:
+            logger.error(f"Invalid JSON in {config_path}")
+            raise
 
     config_data = load_config()
     if args.config not in config_data["configs"]:
@@ -888,14 +1005,17 @@ if __name__ == "__main__":
     settings.chat_rate_limit = global_settings["chat_rate_limit"]
     settings.speech_rate_limit = global_settings["speech_rate_limit"]
 
-    llm_manager = LLMManager(settings.llm_model_name)
+    # Initialize singleton with models
+    singleton_manager.initialize_models(settings.llm_model_name, device)
+
     if selected_config["components"]["ASR"]:
-        asr_manager.model_language[selected_config["language"]] = selected_config["components"]["ASR"]["language_code"]
+        singleton_manager.get_asr_manager().model_language[selected_config["language"]] = selected_config["components"]["ASR"]["language_code"]
     if selected_config["components"]["Translation"]:
+        global translation_configs
         translation_configs.extend(selected_config["components"]["Translation"])
 
     host = args.host if args.host != settings.host else settings.host
     port = args.port if args.port != settings.port else settings.port
 
-    # Run Uvicorn with import string to support workers
-    uvicorn.run("main:app", host=host, port=port, workers=1)
+    # Run Uvicorn with 2 workers
+    uvicorn.run("main:app", host=host, port=port, workers=2, log_level="debug")
