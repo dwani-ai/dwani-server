@@ -49,7 +49,7 @@ else:
 
 # Settings
 class Settings(BaseSettings):
-    llm_model_name: str = "google/gemma3-4b-it"
+    llm_model_name: str = "google/gemma-3-4b-it"
     max_tokens: int = 512
     host: str = "0.0.0.0"
     port: int = 7860
@@ -110,9 +110,6 @@ class LLMManager:
                     raise ValueError(f"Failed to load model {self.model_name}: Model object is None")
                 self.model.eval()
                 self.processor = AutoProcessor.from_pretrained(self.model_name, use_fast=True)
-                dummy_input = self.processor("test", return_tensors="pt").to(self.device)
-                with torch.no_grad():
-                    self.model.generate(**dummy_input, max_new_tokens=10)
                 self.is_loaded = True
                 logger.info(f"LLM {self.model_name} loaded and warmed up on {self.device}")
             except Exception as e:
