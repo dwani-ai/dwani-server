@@ -38,25 +38,27 @@ python src/server/main.py --host 0.0.0.0 --port 7860 --config config_two
    cd dhwani-server
    ```
 
-2. Set Up Virtual Environment:
+2. Install Libraries:
+    - On Ubuntu: ```sudo apt-get install ffmpeg build-essential```
+
+3. Set Up Virtual Environment:
     ```bash
     python -m venv venv
-    source venv/bin/activate  # On Windows: venv\Scripts\activate
+    source venv/bin/activate 
     ```
-3. Install Dependencies:
+4. Install Dependencies:
+    ```bash
+    sudo apt-get install -y ffmpeg build-essential
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal
+    ```
+    ```bash
+    pip install --no-cache-dir --upgrade pip setuptools psutil setuptools-rust torch
+    pip install --no-cache-dir flash-attn --no-build-isolation
+    ```
+
     ```bash
     pip install -r requirements.txt
     ```
-    <!-- 
-    pip install fastapi uvicorn torch transformers nemo_toolkit[asr] parler-tts hydra-core flash-attn slowapi pydantic-settings soundfile pydub pillow numpy
-    ```
-    Note: flash-attn is optional for GPU optimization; skip if not using CUDA.
-    -->
-
-4. Install FFmpeg:
-    - On Ubuntu: ```sudo apt-get install ffmpeg```
-    - On macOS: ```brew install ffmpeg```
-     -On Windows: Download from FFmpeg website and add to PATH.
     
 4. Set Environment Variable:
     Create a .env file in the root directory and add your API key:
