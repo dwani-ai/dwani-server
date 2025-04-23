@@ -50,9 +50,12 @@ python src/server/main.py --host 0.0.0.0 --port 7860 --config config_two
     ```bash
     sudo apt-get install -y ffmpeg build-essential
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal
+    . "$HOME/.cargo/env"
+    export CC=/usr/bin/gcc
+    export ENV CXX=/usr/bin/g++
     ```
     ```bash
-    pip install --no-cache-dir --upgrade pip setuptools psutil setuptools-rust torch
+    pip install --no-cache-dir --upgrade pip setuptools psutil setuptools-rust torch==2.6.0
     pip install --no-cache-dir flash-attn --no-build-isolation
     ```
 
