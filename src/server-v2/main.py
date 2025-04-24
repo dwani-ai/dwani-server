@@ -15,7 +15,8 @@ from logging_config import logger
 from tts_config import SPEED, ResponseFormat, config as tts_config
 
 # Import extracted modules
-from config.settings import parse_arguments
+from config.settings import parse_arguments, settings
+from config.initializer import load_dhwani_config
 from config.constants import SUPPORTED_LANGUAGES, LANGUAGE_TO_SCRIPT, QUANTIZATION_CONFIG
 from utils.audio_utils import load_audio_from_url as load_audio_from_url_original
 from utils.tts_utils import load_audio_from_url, synthesize_speech, SynthesizeRequest, KannadaSynthesizeRequest, EXAMPLES
@@ -25,7 +26,7 @@ from models.schemas import (
 )
 from core.managers import registry, initialize_managers
 from routes.chat import router as chat_router
-from routes.translate import router as translate_router
+from routes.translate import router as translate_router_v0, router_v1 as translate_router_v1
 from routes.speech import router as speech_router
 from routes.health import router as health_router
 
@@ -60,8 +61,8 @@ async def lifespan(app: FastAPI):
             ]
             
             for config in registry.translation_configs:
-                src_lang = config["src_lang"]
-                tgt_lang = config["tgt_lang"]
+                src_lang = config.src_lang
+                tgt_lang = config.tgt_lang
                 key = registry.model_manager._get_model_key(src_lang, tgt_lang)
                 translation_tasks.append((src_lang, tgt_lang, key))
 
@@ -83,25 +84,26 @@ async def lifespan(app: FastAPI):
     registry.llm_manager.unload()
     logger.info("Server shutdown complete")
 
-# FastAPI App
 app = FastAPI(
-    title="Dhwani API",
-    description="AI Chat API supporting Indian languages",
-    version="1.0.0",
-    redirect_slashes=False,
+    title="Indic Language Processing Server",
+    description="API for processing Indic languages with translation, speech, and chat capabilities",
+    version="2.0.0",
     lifespan=lifespan
 )
 
-# Add CORS Middleware
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Add Timing Middleware
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+
+# Add request timing middleware
 @app.middleware("http")
 async def add_request_timing(request: Request, call_next):
     start_time = time()
@@ -112,17 +114,17 @@ async def add_request_timing(request: Request, call_next):
     response.headers["X-Response-Time"] = f"{duration:.3f}"
     return response
 
-limiter = Limiter(key_func=get_remote_address)
-app.state.limiter = limiter
-
-# Mount Routers
+# Include routers
 app.include_router(chat_router)
-app.include_router(translate_router)
+app.include_router(translate_router_v0)
+app.include_router(translate_router_v1)
 app.include_router(speech_router)
 app.include_router(health_router)
 
-# Main Execution
 if __name__ == "__main__":
-    host = args.host
-    port = args.port
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="info"
+    )
