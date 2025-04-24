@@ -2,8 +2,6 @@
 import io
 import tempfile
 import uvicorn
-from typing import List
-
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Body, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
@@ -21,6 +19,7 @@ from tts_config import SPEED, ResponseFormat, config as tts_config
 import torchaudio
 from time import time
 from contextlib import asynccontextmanager
+from typing import List
 
 # Import extracted modules
 from config.settings import Settings, load_config, parse_arguments
@@ -738,9 +737,15 @@ async def chat_v2(
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 @app.post("/v1/transcribe/", response_model=TranscriptionResponse)
-async def transcribe_audio(file: UploadFile = File(...), language: str = Query(..., enum=list(asr_manager.model_language.keys()))):
+async def transcribe_audio(file: UploadFile = File(...), language: str = Query(...)):
     if not asr_manager.model:
         raise HTTPException(status_code=503, detail="ASR model not loaded")
+    valid_languages = list(asr_manager.model_language.keys())
+    if language not in valid_languages:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid language. Supported languages: {', '.join(valid_languages)}"
+        )
     try:
         wav, sr = torchaudio.load(file.file)
         wav = torch.mean(wav, dim=0, keepdim=True)
@@ -758,10 +763,16 @@ async def transcribe_audio(file: UploadFile = File(...), language: str = Query(.
 async def speech_to_speech(
     request: Request,
     file: UploadFile = File(...),
-    language: str = Query(..., enum=list(asr_manager.model_language.keys())),
+    language: str = Query(...),
 ) -> StreamingResponse:
     if not tts_manager.model:
         raise HTTPException(status_code=503, detail="TTS model not loaded")
+    valid_languages = list(asr_manager.model_language.keys())
+    if language not in valid_languages:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid language. Supported languages: {', '.join(valid_languages)}"
+        )
     transcription = await transcribe_audio(file, language)
     logger.info(f"Transcribed text: {transcription.text}")
 
