@@ -1,18 +1,17 @@
 # routes/chat.py
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form, Body, Query
+from fastapi import Depends,APIRouter, HTTPException, Request, UploadFile, File, Query, Body, Form
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from typing import List
+from pydantic import BaseModel, field_validator
 from PIL import Image
 import io
 from logging_config import logger
-from models.schemas import ChatRequest, ChatResponse
-from config.constants import SUPPORTED_LANGUAGES
+from config.constants import SUPPORTED_LANGUAGES, EUROPEAN_LANGUAGES
 from utils.translation_utils import perform_internal_translation
-from core.dependencies import get_llm_manager, get_settings  # Updated import
+from models.schemas import ChatRequest, ChatResponse
+from core.dependencies import get_llm_manager, get_model_manager, get_settings
 
 router = APIRouter(prefix="/v1", tags=["chat"])
-
 limiter = Limiter(key_func=get_remote_address)
 
 @router.post("/chat", response_model=ChatResponse)
@@ -26,8 +25,6 @@ async def chat(
     if not chat_request.prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
     logger.info(f"Received prompt: {chat_request.prompt}, src_lang: {chat_request.src_lang}, tgt_lang: {chat_request.tgt_lang}")
-    
-    EUROPEAN_LANGUAGES = {"deu_Latn", "fra_Latn", "nld_Latn", "spa_Latn", "ita_Latn", "por_Latn", "rus_Cyrl", "pol_Latn"}
     
     try:
         if chat_request.src_lang != "eng_Latn" and chat_request.src_lang not in EUROPEAN_LANGUAGES:
@@ -58,51 +55,6 @@ async def chat(
             logger.info(f"Response in {chat_request.tgt_lang}, no translation needed")
 
         return ChatResponse(response=final_response)
-    except Exception as e:
-        logger.error(f"Error processing request: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
-
-@router.post("/visual_query/")
-async def visual_query(
-    file: UploadFile = File(...),
-    query: str = Body(...),
-    src_lang: str = Query("kan_Knda", enum=list(SUPPORTED_LANGUAGES)),
-    tgt_lang: str = Query("kan_Knda", enum=list(SUPPORTED_LANGUAGES)),
-    llm_manager=Depends(get_llm_manager)
-):
-    try:
-        image = Image.open(file.file)
-        if image.size == (0, 0):
-            raise HTTPException(status_code=400, detail="Uploaded image is empty or invalid")
-
-        if src_lang != "eng_Latn":
-            translated_query = await perform_internal_translation(
-                sentences=[query],
-                src_lang=src_lang,
-                tgt_lang="eng_Latn"
-            )
-            query_to_process = translated_query[0]
-            logger.info(f"Translated query to English: {query_to_process}")
-        else:
-            query_to_process = query
-            logger.info("Query already in English, no translation needed")
-
-        answer = await llm_manager.vision_query(image, query_to_process)
-        logger.info(f"Generated English answer: {answer}")
-
-        if tgt_lang != "eng_Latn":
-            translated_answer = await perform_internal_translation(
-                sentences=[answer],
-                src_lang="eng_Latn",
-                tgt_lang=tgt_lang
-            )
-            final_answer = translated_answer[0]
-            logger.info(f"Translated answer to {tgt_lang}: {final_answer}")
-        else:
-            final_answer = answer
-            logger.info("Answer kept in English, no translation needed")
-
-        return {"answer": final_answer}
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
@@ -187,6 +139,54 @@ async def chat_v2(
                 logger.info("Response kept in English, no translation needed")
 
         return ChatResponse(response=final_response)
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+@router.post("/visual_query/")
+async def visual_query(
+    file: UploadFile = File(...),
+    query: str = Body(...),
+    src_lang: str = Query("kan_Knda", enum=list(SUPPORTED_LANGUAGES)),
+    tgt_lang: str = Query("kan_Knda", enum=list(SUPPORTED_LANGUAGES)),
+    llm_manager=Depends(get_llm_manager),
+    model_manager=Depends(get_model_manager)
+):
+    try:
+        image = Image.open(file.file)
+        if image.size == (0, 0):
+            raise HTTPException(status_code=400, detail="Uploaded image is empty or invalid")
+
+        if src_lang != "eng_Latn":
+            translated_query = await perform_internal_translation(
+                sentences=[query],
+                src_lang=src_lang,
+                tgt_lang="eng_Latn",
+                model_manager=model_manager
+            )
+            query_to_process = translated_query[0]
+            logger.info(f"Translated query to English: {query_to_process}")
+        else:
+            query_to_process = query
+            logger.info("Query already in English, no translation needed")
+
+        answer = await llm_manager.vision_query(image, query_to_process)
+        logger.info(f"Generated English answer: {answer}")
+
+        if tgt_lang != "eng_Latn":
+            translated_answer = await perform_internal_translation(
+                sentences=[answer],
+                src_lang="eng_Latn",
+                tgt_lang=tgt_lang,
+                model_manager=model_manager
+            )
+            final_answer = translated_answer[0]
+            logger.info(f"Translated answer to {tgt_lang}: {final_answer}")
+        else:
+            final_answer = answer
+            logger.info("Answer kept in English, no translation needed")
+
+        return {"answer": final_answer}
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
