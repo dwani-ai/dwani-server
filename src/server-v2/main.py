@@ -28,6 +28,9 @@ from routes.translate import router as translate_router_v0, router_v1 as transla
 from routes.speech import router as speech_router
 from routes.health import router as health_router
 
+# Parse arguments early
+args = parse_arguments()
+
 # Lifespan Event Handler
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -71,6 +74,8 @@ async def lifespan(app: FastAPI):
             logger.error(f"Error loading models: {str(e)}")
             raise
 
+    logger.info("Initializing managers...")
+    initialize_managers(args.config, args)
     logger.info("Starting sequential model loading...")
     load_all_models()
     yield
@@ -118,8 +123,6 @@ app.include_router(health_router)
 
 # Main Execution
 if __name__ == "__main__":
-    args = parse_arguments()
-    initialize_managers(args.config, args)
     host = args.host
     port = args.port
     uvicorn.run(app, host=host, port=port)
