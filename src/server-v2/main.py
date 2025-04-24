@@ -16,11 +16,12 @@ from tts_config import SPEED, ResponseFormat, config as tts_config
 
 # Import extracted modules
 from config.settings import parse_arguments
-from config.constants import SUPPORTED_LANGUAGES, EXAMPLES, LANGUAGE_TO_SCRIPT, QUANTIZATION_CONFIG
-from utils.audio_utils import load_audio_from_url
+from config.constants import SUPPORTED_LANGUAGES, LANGUAGE_TO_SCRIPT, QUANTIZATION_CONFIG
+from utils.audio_utils import load_audio_from_url as load_audio_from_url_original
+from utils.tts_utils import load_audio_from_url, synthesize_speech, SynthesizeRequest, KannadaSynthesizeRequest, EXAMPLES
 from models.schemas import (
     ChatRequest, ChatResponse, TranslationRequest, TranslationResponse,
-    TranscriptionResponse, SynthesizeRequest, KannadaSynthesizeRequest
+    TranscriptionResponse
 )
 from core.managers import registry, initialize_managers
 from routes.chat import router as chat_router

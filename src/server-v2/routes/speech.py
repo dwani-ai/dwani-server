@@ -1,5 +1,5 @@
 # routes/speech.py
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Query, Depends
+from fastapi import Depends, APIRouter, HTTPException, Request, UploadFile, File, Query
 from starlette.responses import StreamingResponse
 import io
 import tempfile
@@ -8,44 +8,15 @@ import torchaudio
 import soundfile as sf
 import numpy as np
 from logging_config import logger
-from models.schemas import TranscriptionResponse, KannadaSynthesizeRequest, ChatRequest
-from config.constants import EXAMPLES, LANGUAGE_TO_SCRIPT
-from utils.audio_utils import load_audio_from_url
+from models.schemas import TranscriptionResponse, ChatRequest
+from config.constants import LANGUAGE_TO_SCRIPT
+from utils.tts_utils import load_audio_from_url, synthesize_speech, SynthesizeRequest, KannadaSynthesizeRequest, EXAMPLES
 from .chat import chat
-from core.dependencies import get_tts_manager, get_asr_manager, get_llm_manager, get_settings  # Updated import
+from core.dependencies import get_tts_manager, get_asr_manager, get_llm_manager, get_settings
 
 router = APIRouter(prefix="/v1", tags=["speech"])
 
-def synthesize_speech(tts_manager, text: str, ref_audio_name: str, ref_text: str):
-    ref_audio_url = None
-    for example in EXAMPLES:
-        if example["audio_name"] == ref_audio_name:
-            ref_audio_url = example["audio_url"]
-            if not ref_text:
-                ref_text = example["ref_text"]
-            break
-    
-    if not ref_audio_url:
-        raise HTTPException(status_code=400, detail="Invalid reference audio name.")
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="Text to synthesize cannot be empty.")
-    if not ref_text or not ref_text.strip():
-        raise HTTPException(status_code=400, detail="Reference text cannot be empty.")
-
-    sample_rate, audio_data = load_audio_from_url(ref_audio_url)
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
-        sf.write(temp_audio.name, audio_data, samplerate=sample_rate, format='WAV')
-        temp_audio.flush()
-        audio = tts_manager.synthesize(text, ref_audio_path=temp_audio.name, ref_text=ref_text)
-
-    if audio.dtype == np.int16:
-        audio = audio.astype(np.float32) / 32768.0
-    buffer = io.BytesIO()
-    sf.write(buffer, audio, 24000, format='WAV')
-    buffer.seek(0)
-    return buffer
-
-@router.post("/audio/speech", response_class=StreamingResponse)
+@router.post("/v1/audio/speech", response_class=StreamingResponse)
 async def synthesize_kannada(
     request: KannadaSynthesizeRequest,
     tts_manager=Depends(get_tts_manager)
@@ -69,7 +40,7 @@ async def synthesize_kannada(
         headers={"Content-Disposition": "attachment; filename=synthesized_kannada_speech.wav"}
     )
 
-@router.post("/transcribe/", response_model=TranscriptionResponse)
+@router.post("/v1/transcribe/", response_model=TranscriptionResponse)
 async def transcribe_audio(
     file: UploadFile = File(...),
     language: str = Query(...),
@@ -96,7 +67,7 @@ async def transcribe_audio(
         logger.error(f"Error in transcription: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
-@router.post("/speech_to_speech")
+@router.post("/v1/speech_to_speech")
 async def speech_to_speech(
     request: Request,
     file: UploadFile = File(...),
