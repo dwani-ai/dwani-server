@@ -37,12 +37,12 @@ class TranslateManager:
                     torch_dtype=torch.float16,
                     attn_implementation="flash_attention_2"
                 )
-                self.model = self.model.to(self.device_type)
+                # Extract device from device_type tuple
+                device = self.device_type[0] if isinstance(self.device_type, tuple) else self.device_type
+                self.model = self.model.to(device)  # Use device instead of device_type
                 self.model = torch.compile(self.model, mode="reduce-overhead")
                 logger.info(f"Translation model {model_name} loaded")
                 logger.info(f"Loading translation model {self.model_name} for {self.src_lang} -> {self.tgt_lang}...")
-            #self.model = True  # Placeholder for actual translation model loading
-            #self.tokenizer = True
             logger.info(f"Translation model {self.model_name} loaded successfully")
         except Exception as e:
             logger.error(f"Error loading translation model {self.model_name}: {str(e)}")

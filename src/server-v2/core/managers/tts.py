@@ -2,17 +2,23 @@
 from fastapi import HTTPException
 from logging_config import logger
 from utils.device_utils import setup_device
+from transformers import  AutoModel
 
 class TTSManager:
     def __init__(self, languages=None):
         self.model = None
         self.device = setup_device()
         self.languages = languages  # Store TTS language configuration
+        self.repo_id = "ai4bharat/IndicF5"
 
     def load(self):
         try:
             logger.info("Loading TTS model...")
-            self.model = True  # Placeholder for actual TTS model loading
+            self.model = AutoModel.from_pretrained(
+                self.repo_id,
+                trust_remote_code=True
+            )
+            self.model = self.model.to(self.device_type)
             if self.languages:
                 logger.info(f"TTS language config: {self.languages.language_code}, audio: {self.languages.audio_name}")
             logger.info("TTS model loaded successfully")
