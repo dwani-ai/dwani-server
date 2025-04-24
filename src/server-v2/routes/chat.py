@@ -1,12 +1,12 @@
 # routes/chat.py
-from fastapi import Depends,APIRouter, HTTPException, Request, UploadFile, File, Query, Body, Form
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Query, Body, Form, Depends
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from pydantic import BaseModel, field_validator
 from PIL import Image
 import io
 from logging_config import logger
-from config.constants import SUPPORTED_LANGUAGES
+from config.constants import SUPPORTED_LANGUAGES#, EUROPEAN_LANGUAGES
 from utils.translation_utils import perform_internal_translation
 from models.schemas import ChatRequest, ChatResponse
 from core.dependencies import get_llm_manager, get_model_manager, get_settings
@@ -20,6 +20,7 @@ async def chat(
     request: Request,
     chat_request: ChatRequest,
     llm_manager=Depends(get_llm_manager),
+    model_manager=Depends(get_model_manager),
     settings=Depends(get_settings)
 ):
     if not chat_request.prompt:
@@ -27,11 +28,12 @@ async def chat(
     logger.info(f"Received prompt: {chat_request.prompt}, src_lang: {chat_request.src_lang}, tgt_lang: {chat_request.tgt_lang}")
     
     try:
-        if chat_request.src_lang != "eng_Latn" and chat_request.src_lang not in EUROPEAN_LANGUAGES:
+        if chat_request.src_lang != "eng_Latn" :# and chat_request.src_lang not in EUROPEAN_LANGUAGES:
             translated_prompt = await perform_internal_translation(
                 sentences=[chat_request.prompt],
                 src_lang=chat_request.src_lang,
-                tgt_lang="eng_Latn"
+                tgt_lang="eng_Latn",
+                model_manager=model_manager
             )
             prompt_to_process = translated_prompt[0]
             logger.info(f"Translated prompt to English: {prompt_to_process}")
@@ -42,11 +44,12 @@ async def chat(
         response = await llm_manager.generate(prompt_to_process, settings.max_tokens)
         logger.info(f"Generated response: {response}")
 
-        if chat_request.tgt_lang != "eng_Latn" and chat_request.tgt_lang not in EUROPEAN_LANGUAGES:
+        if chat_request.tgt_lang != "eng_Latn" :# and chat_request.tgt_lang not in EUROPEAN_LANGUAGES:
             translated_response = await perform_internal_translation(
                 sentences=[response],
                 src_lang="eng_Latn",
-                tgt_lang=chat_request.tgt_lang
+                tgt_lang=chat_request.tgt_lang,
+                model_manager=model_manager
             )
             final_response = translated_response[0]
             logger.info(f"Translated response to {chat_request.tgt_lang}: {final_response}")
@@ -68,6 +71,7 @@ async def chat_v2(
     src_lang: str = Form("kan_Knda"),
     tgt_lang: str = Form("kan_Knda"),
     llm_manager=Depends(get_llm_manager),
+    model_manager=Depends(get_model_manager),
     settings=Depends(get_settings)
 ):
     if not prompt:
@@ -88,7 +92,8 @@ async def chat_v2(
                 translated_prompt = await perform_internal_translation(
                     sentences=[prompt],
                     src_lang=src_lang,
-                    tgt_lang="eng_Latn"
+                    tgt_lang="eng_Latn",
+                    model_manager=model_manager
                 )
                 prompt_to_process = translated_prompt[0]
                 logger.info(f"Translated prompt to English: {prompt_to_process}")
@@ -103,7 +108,8 @@ async def chat_v2(
                 translated_response = await perform_internal_translation(
                     sentences=[decoded],
                     src_lang="eng_Latn",
-                    tgt_lang=tgt_lang
+                    tgt_lang=tgt_lang,
+                    model_manager=model_manager
                 )
                 final_response = translated_response[0]
                 logger.info(f"Translated response to {tgt_lang}: {final_response}")
@@ -115,7 +121,8 @@ async def chat_v2(
                 translated_prompt = await perform_internal_translation(
                     sentences=[prompt],
                     src_lang=src_lang,
-                    tgt_lang="eng_Latn"
+                    tgt_lang="eng_Latn",
+                    model_manager=model_manager
                 )
                 prompt_to_process = translated_prompt[0]
                 logger.info(f"Translated prompt to English: {prompt_to_process}")
@@ -130,7 +137,8 @@ async def chat_v2(
                 translated_response = await perform_internal_translation(
                     sentences=[decoded],
                     src_lang="eng_Latn",
-                    tgt_lang=tgt_lang
+                    tgt_lang=tgt_lang,
+                    model_manager=model_manager
                 )
                 final_response = translated_response[0]
                 logger.info(f"Translated response to {tgt_lang}: {final_response}")
