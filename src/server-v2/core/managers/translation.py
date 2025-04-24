@@ -1,6 +1,6 @@
 # core/managers/translation.py
 from fastapi import HTTPException
-from .. import logger
+from ...logging_config import logger
 from ...utils.device_utils import setup_device
 from ...config.constants import SUPPORTED_LANGUAGES
 

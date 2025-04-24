@@ -3,7 +3,7 @@ import torch
 from transformers import AutoTokenizer, Gemma3ForConditionalGeneration
 from fastapi import HTTPException
 from PIL import Image
-from .. import logger
+from ...logging_config import logger
 from ...config.settings import settings
 from ...utils.device_utils import setup_device
 
