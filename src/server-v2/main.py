@@ -3,12 +3,12 @@ import json
 from fastapi import FastAPI
 import uvicorn
 from settings import Settings
-from api.endpoints import app, load_all_models
 from managers.llm_manager import LLMManager
 from managers.tts_manager import TTSManager
 from managers.asr_manager import ASRModelManager
 from managers.translate_manager import ModelManager
 from logging_config import logger
+from api.endpoints import app, set_global_managers, translation_configs
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the FastAPI server.")
@@ -37,15 +37,16 @@ if __name__ == "__main__":
     settings.speech_rate_limit = global_settings["speech_rate_limit"]
 
     # Initialize global managers
-    global llm_manager, model_manager, asr_manager, tts_manager
     llm_manager = LLMManager(settings.llm_model_name)
     model_manager = ModelManager()
     asr_manager = ASRModelManager()
     tts_manager = TTSManager()
 
+    # Set global managers in endpoints
+    set_global_managers(llm_manager, tts_manager, asr_manager, model_manager)
+
     # Load translation configs
     if selected_config["components"]["Translation"]:
-        from api.endpoints import translation_configs
         translation_configs.extend(selected_config["components"]["Translation"])
 
     # Update ASR language if provided

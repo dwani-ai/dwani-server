@@ -19,11 +19,18 @@ from managers.translate_manager import TranslateManager, ModelManager
 from utils.tts_utils import synthesize_speech, EXAMPLES
 from utils.translation_utils import perform_internal_translation, SUPPORTED_LANGUAGES
 
-# Initialize global managers (set in main.py)
+# Global managers (set in main.py)
 llm_manager: LLMManager = None
 tts_manager: TTSManager = None
 asr_manager: ASRModelManager = None
 model_manager: ModelManager = None
+
+def set_global_managers(llm: LLMManager, tts: TTSManager, asr: ASRModelManager, model: ModelManager):
+    global llm_manager, tts_manager, asr_manager, model_manager
+    llm_manager = llm
+    tts_manager = tts
+    asr_manager = asr
+    model_manager = model
 
 # Translation configs
 translation_configs = []
@@ -336,7 +343,7 @@ async def chat_v2(
                 logger.info("Prompt already in English, no translation needed")
 
             from settings import settings
-            decoded = await LLMManager.generate(prompt_to_process, settings.max_tokens)
+            decoded = await llm_manager.generate(prompt_to_process, settings.max_tokens)
             logger.info(f"Generated English response: {decoded}")
 
             if tgt_lang != "eng_Latn":
@@ -358,9 +365,11 @@ async def chat_v2(
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 @app.post("/v1/transcribe/", response_model=TranscriptionResponse)
-async def transcribe_audio(file: UploadFile = File(...), language: str = Query(..., enum=list(asr_manager.model_language.keys()))):
+async def transcribe_audio(file: UploadFile = File(...), language: str = Query(...)):
     if not asr_manager.model:
         raise HTTPException(status_code=503, detail="ASR model not loaded")
+    if language not in asr_manager.model_language:
+        raise HTTPException(status_code=400, detail=f"Unsupported language: {language}. Supported languages: {list(asr_manager.model_language.keys())}")
     try:
         wav, sr = torchaudio.load(file.file)
         wav = torch.mean(wav, dim=0, keepdim=True).to(device)
