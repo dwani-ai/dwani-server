@@ -1,6 +1,6 @@
 # core/dependencies.py
 from fastapi import HTTPException
-from main import llm_manager, model_manager, asr_manager, tts_manager, ip, settings
+from core.managers import llm_manager, model_manager, asr_manager, tts_manager, ip, settings
 
 def get_llm_manager():
     if llm_manager is None:
