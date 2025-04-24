@@ -11,13 +11,10 @@ from logging_config import logger
 from models.schemas import TranscriptionResponse, KannadaSynthesizeRequest, ChatRequest
 from config.constants import EXAMPLES, LANGUAGE_TO_SCRIPT
 from utils.audio_utils import load_audio_from_url
+from main import tts_manager, asr_manager
 from .chat import chat  # Import chat endpoint for speech_to_speech
 
 router = APIRouter(prefix="/v1", tags=["speech"])
-
-# Global managers (will be imported from main.py or managers.py later)
-tts_manager = None
-asr_manager = None
 
 def synthesize_speech(tts_manager, text: str, ref_audio_name: str, ref_text: str):
     ref_audio_url = None

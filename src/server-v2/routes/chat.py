@@ -8,17 +8,15 @@ import io
 from logging_config import logger
 from models.schemas import ChatRequest, ChatResponse
 from config.constants import SUPPORTED_LANGUAGES
+from main import llm_manager, settings  # Import from main.py
 from .translate import perform_internal_translation  # Import from translate router
 
 router = APIRouter(prefix="/v1", tags=["chat"])
 
 limiter = Limiter(key_func=get_remote_address)
 
-# Global managers (will be imported from main.py or managers.py later)
-llm_manager = None
-
 @router.post("/chat", response_model=ChatResponse)
-@limiter.limit("100/minute")  # Use settings.chat_rate_limit if accessible
+@limiter.limit(lambda: settings.chat_rate_limit)
 async def chat(request: Request, chat_request: ChatRequest):
     if not chat_request.prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
@@ -39,7 +37,7 @@ async def chat(request: Request, chat_request: ChatRequest):
             prompt_to_process = chat_request.prompt
             logger.info("Prompt in English or European language, no translation needed")
 
-        response = await llm_manager.generate(prompt_to_process, max_tokens=512)  # Hardcoded max_tokens for now
+        response = await llm_manager.generate(prompt_to_process, settings.max_tokens)
         logger.info(f"Generated response: {response}")
 
         if chat_request.tgt_lang != "eng_Latn" and chat_request.tgt_lang not in EUROPEAN_LANGUAGES:
@@ -104,7 +102,7 @@ async def visual_query(
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 @router.post("/chat_v2", response_model=ChatResponse)
-@limiter.limit("100/minute")  # Use settings.chat_rate_limit if accessible
+@limiter.limit(lambda: settings.chat_rate_limit)
 async def chat_v2(
     request: Request,
     prompt: str = Form(...),
@@ -165,7 +163,7 @@ async def chat_v2(
                 prompt_to_process = prompt
                 logger.info("Prompt already in English, no translation needed")
 
-            decoded = await llm_manager.generate(prompt_to_process, max_tokens=512)  # Hardcoded max_tokens for now
+            decoded = await llm_manager.generate(prompt_to_process, settings.max_tokens)
             logger.info(f"Generated English response: {decoded}")
 
             if tgt_lang != "eng_Latn":

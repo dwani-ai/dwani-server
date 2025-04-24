@@ -3,8 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from logging_config import logger
 from models.schemas import TranslationRequest, TranslationResponse
-from . import model_manager  # Global manager, to be replaced later
-
+from main import model_manager, ip  # Import from main.py
+import torch
 router = APIRouter(prefix="/v0", tags=["translate"])
 
 def get_translate_manager(src_lang: str, tgt_lang: str):

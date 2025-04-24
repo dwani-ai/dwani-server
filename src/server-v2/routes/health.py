@@ -2,14 +2,9 @@
 from fastapi import APIRouter, HTTPException
 from starlette.responses import RedirectResponse
 from logging_config import logger
-from config.settings import Settings
+from main import llm_manager, settings
 
 router = APIRouter(prefix="/v1", tags=["health"])
-
-# Global manager (will be imported from main.py or managers.py later)
-llm_manager = None
-
-settings = Settings()
 
 @router.get("/health")
 async def health_check():

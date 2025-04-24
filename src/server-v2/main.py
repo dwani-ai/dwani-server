@@ -17,6 +17,7 @@ import torchaudio
 from time import time
 from contextlib import asynccontextmanager
 from typing import List
+from PIL import Image
 
 # Import extracted modules
 from config.settings import Settings, load_config, parse_arguments
@@ -28,10 +29,10 @@ from models.schemas import (
     ChatRequest, ChatResponse, TranslationRequest, TranslationResponse,
     TranscriptionResponse, SynthesizeRequest, KannadaSynthesizeRequest
 )
-from routes.chat import router as chat_router, llm_manager as chat_llm_manager
-from routes.translate import router as translate_router_v0, router_v1 as translate_router_v1, model_manager as translate_model_manager, ip
-from routes.speech import router as speech_router, tts_manager as speech_tts_manager, asr_manager as speech_asr_manager
-from routes.health import router as health_router, llm_manager as health_llm_manager, settings as health_settings
+from routes.chat import router as chat_router
+from routes.translate import router as translate_router_v0, router_v1 as translate_router_v1
+from routes.speech import router as speech_router
+from routes.health import router as health_router
 
 # Device setup
 device, torch_dtype = setup_device()
@@ -452,15 +453,6 @@ if __name__ == "__main__":
     model_manager = ModelManager()
     asr_manager = ASRModelManager()
     tts_manager = TTSManager(ckpt_path=tts_ckpt_path)
-
-    # Assign to router modules
-    chat_llm_manager = llm_manager
-    translate_model_manager = model_manager
-    translate_ip = ip
-    speech_tts_manager = tts_manager
-    speech_asr_manager = asr_manager
-    health_llm_manager = llm_manager
-    health_settings = settings
 
     if selected_config["components"]["ASR"]:
         asr_model_name = selected_config["components"]["ASR"]["model"]
