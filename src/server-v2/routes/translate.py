@@ -4,7 +4,8 @@ from typing import List
 from logging_config import logger
 from models.schemas import TranslationRequest, TranslationResponse
 from main import get_model_manager, get_ip
-import torch
+from utils.translation_utils import perform_internal_translation  # Updated import
+
 router = APIRouter(prefix="/v0", tags=["translate"])
 
 def get_translate_manager(src_lang: str, tgt_lang: str, model_manager=Depends(get_model_manager)):
@@ -69,25 +70,3 @@ async def translate_endpoint(request: TranslationRequest, model_manager=Depends(
     except Exception as e:
         logger.error(f"Unexpected error during translation: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
-
-async def perform_internal_translation(
-    sentences: List[str],
-    src_lang: str,
-    tgt_lang: str,
-    model_manager=Depends(get_model_manager),
-    ip=Depends(get_ip)
-) -> List[str]:
-    try:
-        translate_manager = model_manager.get_model(src_lang, tgt_lang)
-    except ValueError as e:
-        logger.info(f"Model not preloaded: {str(e)}, loading now...")
-        key = model_manager._get_model_key(src_lang, tgt_lang)
-        model_manager.load_model(src_lang, tgt_lang, key)
-        translate_manager = model_manager.get_model(src_lang, tgt_lang)
-    
-    if not translate_manager.model:
-        translate_manager.load()
-    
-    request = TranslationRequest(sentences=sentences, src_lang=src_lang, tgt_lang=tgt_lang)
-    response = await translate(request, translate_manager, ip)
-    return response.translations

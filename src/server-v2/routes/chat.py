@@ -8,7 +8,7 @@ import io
 from logging_config import logger
 from models.schemas import ChatRequest, ChatResponse
 from config.constants import SUPPORTED_LANGUAGES
-from .translate import perform_internal_translation
+from utils.translation_utils import perform_internal_translation  # Updated import
 from main import get_llm_manager, get_settings
 
 router = APIRouter(prefix="/v1", tags=["chat"])
