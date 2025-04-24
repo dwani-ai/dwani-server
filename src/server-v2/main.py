@@ -22,7 +22,7 @@ from models.schemas import (
     ChatRequest, ChatResponse, TranslationRequest, TranslationResponse,
     TranscriptionResponse, SynthesizeRequest, KannadaSynthesizeRequest
 )
-from core.managers import llm_manager, model_manager, asr_manager, tts_manager, translation_configs, initialize_managers
+from core.managers import registry, initialize_managers
 from routes.chat import router as chat_router
 from routes.translate import router as translate_router_v0, router_v1 as translate_router_v1
 from routes.speech import router as speech_router
@@ -38,17 +38,17 @@ async def lifespan(app: FastAPI):
         try:
             # Load LLM model
             logger.info("Loading LLM model...")
-            llm_manager.load()
+            registry.llm_manager.load()
             logger.info("LLM model loaded successfully")
 
             # Load TTS model
             logger.info("Loading TTS model...")
-            tts_manager.load()
+            registry.tts_manager.load()
             logger.info("TTS model loaded successfully")
 
             # Load ASR model
             logger.info("Loading ASR model...")
-            asr_manager.load()
+            registry.asr_manager.load()
             logger.info("ASR model loaded successfully")
 
             # Load translation models
@@ -58,15 +58,15 @@ async def lifespan(app: FastAPI):
                 ('kan_Knda', 'hin_Deva', 'indic_indic'),
             ]
             
-            for config in translation_configs:
+            for config in registry.translation_configs:
                 src_lang = config["src_lang"]
                 tgt_lang = config["tgt_lang"]
-                key = model_manager._get_model_key(src_lang, tgt_lang)
+                key = registry.model_manager._get_model_key(src_lang, tgt_lang)
                 translation_tasks.append((src_lang, tgt_lang, key))
 
             for src_lang, tgt_lang, key in translation_tasks:
                 logger.info(f"Loading translation model for {src_lang} -> {tgt_lang}...")
-                model_manager.load_model(src_lang, tgt_lang, key)
+                registry.model_manager.load_model(src_lang, tgt_lang, key)
                 logger.info(f"Translation model for {key} loaded successfully")
 
             logger.info("All models loaded successfully")
@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting sequential model loading...")
     load_all_models()
     yield
-    llm_manager.unload()
+    registry.llm_manager.unload()
     logger.info("Server shutdown complete")
 
 # FastAPI App

@@ -16,15 +16,18 @@ device, torch_dtype = setup_device()
 # Initialize settings
 settings = Settings()
 
-# Global Managers
-llm_manager = None
-model_manager = None
-asr_manager = None
-tts_manager = None
-ip = IndicProcessor(inference=True)
+# Manager Registry
+class ManagerRegistry:
+    def __init__(self):
+        self.llm_manager = None
+        self.model_manager = None
+        self.asr_manager = None
+        self.tts_manager = None
+        self.ip = IndicProcessor(inference=True)
+        self.translation_configs = []
 
-# Translation configurations (populated later)
-translation_configs = []
+# Singleton registry instance
+registry = ManagerRegistry()
 
 # LLM Manager
 class LLMManager:
@@ -314,7 +317,6 @@ class ASRModelManager:
             logger.info("ASR model loaded")
 
 def initialize_managers(config_name: str, args):
-    global llm_manager, model_manager, asr_manager, tts_manager, translation_configs
     from config.settings import load_config
     config_data = load_config()
     if config_name not in config_data["configs"]:
@@ -332,14 +334,14 @@ def initialize_managers(config_name: str, args):
 
     tts_ckpt_path = selected_config["components"].get("TTS", {}).get("ckpt_path")
 
-    llm_manager = LLMManager(settings.llm_model_name)
-    model_manager = ModelManager()
-    asr_manager = ASRModelManager()
-    tts_manager = TTSManager(ckpt_path=tts_ckpt_path)
+    registry.llm_manager = LLMManager(settings.llm_model_name)
+    registry.model_manager = ModelManager()
+    registry.asr_manager = ASRModelManager()
+    registry.tts_manager = TTSManager(ckpt_path=tts_ckpt_path)
 
     if selected_config["components"]["ASR"]:
         asr_model_name = selected_config["components"]["ASR"]["model"]
-        asr_manager.model_language[selected_config["language"]] = selected_config["components"]["ASR"]["language_code"]
+        registry.asr_manager.model_language[selected_config["language"]] = selected_config["components"]["ASR"]["language_code"]
 
     if selected_config["components"]["Translation"]:
-        translation_configs.extend(selected_config["components"]["Translation"])
+        registry.translation_configs.extend(selected_config["components"]["Translation"])
