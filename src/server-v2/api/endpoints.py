@@ -77,15 +77,15 @@ async def lifespan(app: FastAPI):
         try:
             logger.info("Loading LLM model...")
             llm_manager.load()
-            logger.info("LLM model loaded successfully")
+            logger.info("LLM model loaded successfully on cuda:0")
 
             logger.info("Loading TTS model...")
             tts_manager.load()
-            logger.info("TTS model loaded successfully")
+            logger.info("TTS model loaded successfully on cuda:0")
 
             logger.info("Loading ASR model...")
             asr_manager.load()
-            logger.info("ASR model loaded successfully")
+            logger.info("ASR model loaded successfully on cuda:0")
 
             translation_tasks = [
                 ('eng_Latn', 'kan_Knda', 'eng_indic'),
@@ -101,17 +101,22 @@ async def lifespan(app: FastAPI):
 
             for src_lang, tgt_lang, key in translation_tasks:
                 logger.info(f"Loading translation model for {src_lang} -> {tgt_lang}...")
-                model_manager.load_model(src_lang, tgt_lang, key)
-                logger.info(f"Translation model for {key} loaded successfully")
+                try:
+                    model_manager.load_model(src_lang, tgt_lang, key)
+                    logger.info(f"Translation model for {key} loaded successfully on cuda:0")
+                except Exception as e:
+                    logger.error(f"Failed to load translation model for {key}: {str(e)}")
+                    raise
 
-            logger.info("All models loaded successfully")
+            logger.info("All models loaded successfully during startup")
         except Exception as e:
-            logger.error(f"Error loading models: {str(e)}")
+            logger.error(f"Critical error loading models during startup: {str(e)}")
             raise
 
-    logger.info("Starting sequential model loading...")
+    logger.info("Starting sequential model loading during server startup...")
     load_all_models()
     yield
+    logger.info("Unloading LLM model during shutdown...")
     llm_manager.unload()
     logger.info("Server shutdown complete")
 
@@ -153,6 +158,9 @@ async def unload_all_models():
     try:
         logger.info("Starting to unload all models...")
         llm_manager.unload()
+        tts_manager.model = None
+        asr_manager.model = None
+        model_manager.models.clear()
         logger.info("All models unloaded successfully")
         return {"status": "success", "message": "All models unloaded"}
     except Exception as e:
@@ -162,13 +170,13 @@ async def unload_all_models():
 @app.post("/v1/load_all_models")
 async def load_all_models_endpoint():
     try:
-        logger.info("Starting to load all models...")
-        llm_manager.load()
-        logger.info("All models loaded successfully")
-        return {"status": "success", "message": "All models loaded"}
+        logger.info("Starting to reload all models...")
+        load_all_models()
+        logger.info("All models reloaded successfully")
+        return {"status": "success", "message": "All models reloaded"}
     except Exception as e:
-        logger.error(f"Error loading models: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to load models: {str(e)}")
+        logger.error(f"Error reloading models: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to reload models: {str(e)}")
 
 @app.post("/v1/translate", response_model=TranslationResponse)
 async def translate_endpoint(request: TranslationRequest):
@@ -342,22 +350,22 @@ async def chat_v2(
                 prompt_to_process = prompt
                 logger.info("Prompt already in English, no translation needed")
 
-        from settings import settings
-        decoded = await llm_manager.generate(prompt_to_process, settings.max_tokens)
-        logger.info(f"Generated English response: {decoded}")
+            from settings import settings
+            decoded = await llm_manager.generate(prompt_to_process, settings.max_tokens)
+            logger.info(f"Generated English response: {decoded}")
 
-        if tgt_lang != "eng_Latn":
-            translated_response = await perform_internal_translation(
-                sentences=[decoded],
-                src_lang="eng_Latn",
-                tgt_lang=tgt_lang,
-                model_manager=model_manager
-            )
-            final_response = translated_response[0]
-            logger.info(f"Translated response to {tgt_lang}: {final_response}")
-        else:
-            final_response = decoded
-            logger.info("Response kept in English, no translation needed")
+            if tgt_lang != "eng_Latn":
+                translated_response = await perform_internal_translation(
+                    sentences=[decoded],
+                    src_lang="eng_Latn",
+                    tgt_lang=tgt_lang,
+                    model_manager=model_manager
+                )
+                final_response = translated_response[0]
+                logger.info(f"Translated response to {tgt_lang}: {final_response}")
+            else:
+                final_response = decoded
+                logger.info("Response kept in English, no translation needed")
 
         return ChatResponse(response=final_response)
     except Exception as e:

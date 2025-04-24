@@ -27,7 +27,7 @@ class TranslateManager:
                 trust_remote_code=True
             )
             self.model = AutoModelForSeq2SeqLM.from_pretrained(
-                self.model_name,
+                model_name,
                 trust_remote_code=True,
                 torch_dtype=torch.float16,
                 attn_implementation="flash_attention_2"
@@ -64,6 +64,6 @@ class ModelManager:
             return 'eng_indic'
         elif not src_lang.startswith("eng") and tgt_lang.startswith("eng"):
             return 'indic_eng'
-        elif not src_lang.startswith("eng") and not self.tgt_lang.startswith("eng"):
+        elif not src_lang.startswith("eng") and not tgt_lang.startswith("eng"):
             return 'indic_indic'
         raise ValueError("Invalid language combination")

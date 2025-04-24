@@ -38,7 +38,7 @@ if __name__ == "__main__":
 
     # Initialize global managers
     llm_manager = LLMManager(settings.llm_model_name)
-    model_manager = ModelManager()
+    model_manager = ModelManager(is_lazy_loading=False)  # Disable lazy loading
     asr_manager = ASRModelManager()
     tts_manager = TTSManager()
 
