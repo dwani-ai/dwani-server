@@ -3,6 +3,8 @@ from transformers import Gemma3ForConditionalGeneration, AutoProcessor
 from fastapi import HTTPException
 from logging_config import logger
 from settings import quantization_config, device, torch_dtype
+from PIL import Image
+
 
 class LLMManager:
     def __init__(self, model_name: str):

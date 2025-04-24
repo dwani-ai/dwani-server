@@ -2,6 +2,7 @@ import torch
 from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings
 from logging_config import logger
+from typing import List
 
 # Device setup
 device = "cuda:0"
