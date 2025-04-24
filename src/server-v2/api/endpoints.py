@@ -31,6 +31,7 @@ def set_global_managers(llm: LLMManager, tts: TTSManager, asr: ASRModelManager, 
     tts_manager = tts
     asr_manager = asr
     model_manager = model
+    logger.info("Global managers set successfully")
 
 # Translation configs
 translation_configs = []
@@ -74,18 +75,23 @@ def get_translate_manager(src_lang: str, tgt_lang: str) -> TranslateManager:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     def load_all_models():
+        logger.info("Entering load_all_models function")
+        if llm_manager is None or tts_manager is None or asr_manager is None or model_manager is None:
+            logger.error("One or more global managers are None")
+            raise ValueError("Global managers not initialized")
+        
         try:
             logger.info("Loading LLM model...")
             llm_manager.load()
-            logger.info("LLM model loaded successfully on cuda:0")
+            logger.info(f"LLM model {llm_manager.model_name} loaded successfully on cuda:0")
 
             logger.info("Loading TTS model...")
             tts_manager.load()
-            logger.info("TTS model loaded successfully on cuda:0")
+            logger.info(f"TTS model {tts_manager.repo_id} loaded successfully on cuda:0")
 
             logger.info("Loading ASR model...")
             asr_manager.load()
-            logger.info("ASR model loaded successfully on cuda:0")
+            logger.info("ASR model ai4bharat/indic-conformer-600m-multilingual loaded successfully on cuda:0")
 
             translation_tasks = [
                 ('eng_Latn', 'kan_Knda', 'eng_indic'),
@@ -93,6 +99,7 @@ async def lifespan(app: FastAPI):
                 ('kan_Knda', 'hin_Deva', 'indic_indic'),
             ]
             
+            logger.info(f"Translation configs: {translation_configs}")
             for config in translation_configs:
                 src_lang = config["src_lang"]
                 tgt_lang = config["tgt_lang"]
@@ -100,7 +107,7 @@ async def lifespan(app: FastAPI):
                 translation_tasks.append((src_lang, tgt_lang, key))
 
             for src_lang, tgt_lang, key in translation_tasks:
-                logger.info(f"Loading translation model for {src_lang} -> {tgt_lang}...")
+                logger.info(f"Loading translation model for {src_lang} -> {tgt_lang} (key: {key})...")
                 try:
                     model_manager.load_model(src_lang, tgt_lang, key)
                     logger.info(f"Translation model for {key} loaded successfully on cuda:0")
@@ -113,8 +120,9 @@ async def lifespan(app: FastAPI):
             logger.error(f"Critical error loading models during startup: {str(e)}")
             raise
 
-    logger.info("Starting sequential model loading during server startup...")
+    logger.info("Starting FastAPI lifespan handler...")
     load_all_models()
+    logger.info("Lifespan startup complete, yielding to FastAPI...")
     yield
     logger.info("Unloading LLM model during shutdown...")
     llm_manager.unload()
@@ -265,7 +273,7 @@ async def visual_query(
             logger.info("Query already in English, no translation needed")
 
         answer = await llm_manager.vision_query(image, query_to_process)
-        logger.info(f"Generated English answer: {answer}")
+        logger.info("generated English answer: {answer}")
 
         if tgt_lang != "eng_Latn":
             translated_answer = await perform_internal_translation(
