@@ -6,7 +6,7 @@ from pydantic import BaseModel, field_validator
 from PIL import Image
 import io
 from logging_config import logger
-from config.constants import SUPPORTED_LANGUAGES, EUROPEAN_LANGUAGES
+from config.constants import SUPPORTED_LANGUAGES
 from utils.translation_utils import perform_internal_translation
 from models.schemas import ChatRequest, ChatResponse
 from core.dependencies import get_llm_manager, get_model_manager, get_settings
