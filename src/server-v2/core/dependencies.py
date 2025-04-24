@@ -1,6 +1,7 @@
 # core/dependencies.py
 from fastapi import HTTPException
-from core.managers import registry, settings
+from core.managers import registry
+from config import settings
 
 def get_llm_manager():
     if registry.llm_manager is None:
