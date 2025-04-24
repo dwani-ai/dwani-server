@@ -1,5 +1,5 @@
 # routes/speech.py
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Query
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Query, Depends
 from starlette.responses import StreamingResponse
 import io
 import tempfile
@@ -11,8 +11,8 @@ from logging_config import logger
 from models.schemas import TranscriptionResponse, KannadaSynthesizeRequest, ChatRequest
 from config.constants import EXAMPLES, LANGUAGE_TO_SCRIPT
 from utils.audio_utils import load_audio_from_url
-from main import tts_manager, asr_manager
-from .chat import chat  # Import chat endpoint for speech_to_speech
+from .chat import chat
+from main import get_tts_manager, get_asr_manager, get_llm_manager, get_settings
 
 router = APIRouter(prefix="/v1", tags=["speech"])
 
@@ -46,7 +46,10 @@ def synthesize_speech(tts_manager, text: str, ref_audio_name: str, ref_text: str
     return buffer
 
 @router.post("/audio/speech", response_class=StreamingResponse)
-async def synthesize_kannada(request: KannadaSynthesizeRequest):
+async def synthesize_kannada(
+    request: KannadaSynthesizeRequest,
+    tts_manager=Depends(get_tts_manager)
+):
     if not tts_manager.model:
         raise HTTPException(status_code=503, detail="TTS model not loaded")
     kannada_example = next(ex for ex in EXAMPLES if ex["audio_name"] == "KAN_F (Happy)")
@@ -67,7 +70,11 @@ async def synthesize_kannada(request: KannadaSynthesizeRequest):
     )
 
 @router.post("/transcribe/", response_model=TranscriptionResponse)
-async def transcribe_audio(file: UploadFile = File(...), language: str = Query(...)):
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    language: str = Query(...),
+    asr_manager=Depends(get_asr_manager)
+):
     if not asr_manager.model:
         raise HTTPException(status_code=503, detail="ASR model not loaded")
     valid_languages = list(asr_manager.model_language.keys())
@@ -94,6 +101,10 @@ async def speech_to_speech(
     request: Request,
     file: UploadFile = File(...),
     language: str = Query(...),
+    tts_manager=Depends(get_tts_manager),
+    asr_manager=Depends(get_asr_manager),
+    llm_manager=Depends(get_llm_manager),
+    settings=Depends(get_settings)
 ) -> StreamingResponse:
     if not tts_manager.model:
         raise HTTPException(status_code=503, detail="TTS model not loaded")
@@ -103,7 +114,7 @@ async def speech_to_speech(
             status_code=400,
             detail=f"Invalid language. Supported languages: {', '.join(valid_languages)}"
         )
-    transcription = await transcribe_audio(file, language)
+    transcription = await transcribe_audio(file, language, asr_manager)
     logger.info(f"Transcribed text: {transcription.text}")
 
     chat_request = ChatRequest(
@@ -111,9 +122,9 @@ async def speech_to_speech(
         src_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda"),
         tgt_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda")
     )
-    processed_text = await chat(request, chat_request)
+    processed_text = await chat(request, chat_request, llm_manager, settings)
     logger.info(f"Processed text: {processed_text.response}")
 
     voice_request = KannadaSynthesizeRequest(text=processed_text.response)
-    audio_response = await synthesize_kannada(voice_request)
+    audio_response = await synthesize_kannada(voice_request, tts_manager)
     return audio_response

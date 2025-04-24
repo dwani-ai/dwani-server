@@ -6,18 +6,23 @@ from typing import List
 from PIL import Image
 import io
 from logging_config import logger
-from models.schemas import ChatRequest, ChatResponse
+from models import ChatRequest, ChatResponse
 from config.constants import SUPPORTED_LANGUAGES
-from main import llm_manager, settings  # Import from main.py
-from .translate import perform_internal_translation  # Import from translate router
+from .translate import perform_internal_translation
+from main import get_llm_manager, get_settings
 
 router = APIRouter(prefix="/v1", tags=["chat"])
 
 limiter = Limiter(key_func=get_remote_address)
 
 @router.post("/chat", response_model=ChatResponse)
-@limiter.limit(lambda: settings.chat_rate_limit)
-async def chat(request: Request, chat_request: ChatRequest):
+@limiter.limit(lambda: get_settings().chat_rate_limit)
+async def chat(
+    request: Request,
+    chat_request: ChatRequest,
+    llm_manager=Depends(get_llm_manager),
+    settings=Depends(get_settings)
+):
     if not chat_request.prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
     logger.info(f"Received prompt: {chat_request.prompt}, src_lang: {chat_request.src_lang}, tgt_lang: {chat_request.tgt_lang}")
@@ -63,6 +68,7 @@ async def visual_query(
     query: str = Body(...),
     src_lang: str = Query("kan_Knda", enum=list(SUPPORTED_LANGUAGES)),
     tgt_lang: str = Query("kan_Knda", enum=list(SUPPORTED_LANGUAGES)),
+    llm_manager=Depends(get_llm_manager)
 ):
     try:
         image = Image.open(file.file)
@@ -102,13 +108,15 @@ async def visual_query(
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 @router.post("/chat_v2", response_model=ChatResponse)
-@limiter.limit(lambda: settings.chat_rate_limit)
+@limiter.limit(lambda: get_settings().chat_rate_limit)
 async def chat_v2(
     request: Request,
     prompt: str = Form(...),
     image: UploadFile = File(default=None),
     src_lang: str = Form("kan_Knda"),
     tgt_lang: str = Form("kan_Knda"),
+    llm_manager=Depends(get_llm_manager),
+    settings=Depends(get_settings)
 ):
     if not prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")

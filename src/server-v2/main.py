@@ -2,7 +2,7 @@
 import io
 import tempfile
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -17,7 +17,6 @@ import torchaudio
 from time import time
 from contextlib import asynccontextmanager
 from typing import List
-from PIL import Image
 
 # Import extracted modules
 from config.settings import Settings, load_config, parse_arguments
@@ -49,6 +48,35 @@ ip = IndicProcessor(inference=True)
 
 # Translation configurations (populated later)
 translation_configs = []
+
+# Dependency Functions
+def get_llm_manager():
+    if llm_manager is None:
+        raise HTTPException(status_code=500, detail="LLM manager not initialized")
+    return llm_manager
+
+def get_model_manager():
+    if model_manager is None:
+        raise HTTPException(status_code=500, detail="Model manager not initialized")
+    return model_manager
+
+def get_asr_manager():
+    if asr_manager is None:
+        raise HTTPException(status_code=500, detail="ASR manager not initialized")
+    return asr_manager
+
+def get_tts_manager():
+    if tts_manager is None:
+        raise HTTPException(status_code=500, detail="TTS manager not initialized")
+    return tts_manager
+
+def get_ip():
+    if ip is None:
+        raise HTTPException(status_code=500, detail="IndicProcessor not initialized")
+    return ip
+
+def get_settings():
+    return settings
 
 # LLM Manager
 class LLMManager:

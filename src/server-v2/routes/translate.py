@@ -3,15 +3,19 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from logging_config import logger
 from models.schemas import TranslationRequest, TranslationResponse
-from main import model_manager, ip  # Import from main.py
+from main import get_model_manager, get_ip
 import torch
 router = APIRouter(prefix="/v0", tags=["translate"])
 
-def get_translate_manager(src_lang: str, tgt_lang: str):
+def get_translate_manager(src_lang: str, tgt_lang: str, model_manager=Depends(get_model_manager)):
     return model_manager.get_model(src_lang, tgt_lang)
 
 @router.post("/translate", response_model=TranslationResponse)
-async def translate(request: TranslationRequest, translate_manager=Depends(get_translate_manager)):
+async def translate(
+    request: TranslationRequest,
+    translate_manager=Depends(get_translate_manager),
+    ip=Depends(get_ip)
+):
     input_sentences = request.sentences
     src_lang = request.src_lang
     tgt_lang = request.tgt_lang
@@ -51,13 +55,14 @@ async def translate(request: TranslationRequest, translate_manager=Depends(get_t
 router_v1 = APIRouter(prefix="/v1", tags=["translate"])
 
 @router_v1.post("/translate", response_model=TranslationResponse)
-async def translate_endpoint(request: TranslationRequest):
+async def translate_endpoint(request: TranslationRequest, model_manager=Depends(get_model_manager)):
     logger.info(f"Received translation request: {request.dict()}")
     try:
         translations = await perform_internal_translation(
             sentences=request.sentences,
             src_lang=request.src_lang,
-            tgt_lang=request.tgt_lang
+            tgt_lang=request.tgt_lang,
+            model_manager=model_manager
         )
         logger.info(f"Translation successful: {translations}")
         return TranslationResponse(translations=translations)
@@ -65,7 +70,13 @@ async def translate_endpoint(request: TranslationRequest):
         logger.error(f"Unexpected error during translation: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
 
-async def perform_internal_translation(sentences: List[str], src_lang: str, tgt_lang: str) -> List[str]:
+async def perform_internal_translation(
+    sentences: List[str],
+    src_lang: str,
+    tgt_lang: str,
+    model_manager=Depends(get_model_manager),
+    ip=Depends(get_ip)
+) -> List[str]:
     try:
         translate_manager = model_manager.get_model(src_lang, tgt_lang)
     except ValueError as e:
@@ -78,5 +89,5 @@ async def perform_internal_translation(sentences: List[str], src_lang: str, tgt_
         translate_manager.load()
     
     request = TranslationRequest(sentences=sentences, src_lang=src_lang, tgt_lang=tgt_lang)
-    response = await translate(request, translate_manager)
+    response = await translate(request, translate_manager, ip)
     return response.translations
