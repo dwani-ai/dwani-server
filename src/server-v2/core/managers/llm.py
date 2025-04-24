@@ -58,11 +58,3 @@ class LLMManager:
         except Exception as e:
             logger.error(f"Error processing vision query: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Vision query failed: {str(e)}")
-
-    async def chat_v2(self, image: Image.Image, prompt: str):
-        try:
-            # Placeholder for chat_v2 logic
-            return f"Chat v2 response for prompt: {prompt}"
-        except Exception as e:
-            logger.error(f"Error in chat_v2: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Chat v2 failed: {str(e)}")
