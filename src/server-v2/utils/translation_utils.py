@@ -1,8 +1,8 @@
 # utils/translation_utils.py
-from fastapi import HTTPException
+from fastapi import HTTPException, Depends
 from logging_config import logger
 from models.schemas import TranslationRequest, TranslationResponse
-from .translate import translate
+from routes.translate import translate
 from core.dependencies import get_model_manager, get_ip
 
 async def perform_internal_translation(sentences: list[str], src_lang: str, tgt_lang: str, model_manager=Depends(get_model_manager)) -> list[str]:

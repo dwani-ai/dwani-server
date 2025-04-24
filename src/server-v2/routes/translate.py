@@ -1,22 +1,15 @@
 # routes/translate.py
-from fastapi import APIRouter, Depends, HTTPException
-from typing import List
+from fastapi import APIRouter, HTTPException, Depends
 from logging_config import logger
 from models.schemas import TranslationRequest, TranslationResponse
-from core.dependencies import get_model_manager, get_ip  # Updated import
-from utils.translation_utils import perform_internal_translation
+from core.dependencies import get_model_manager, get_ip
+from config.constants import SUPPORTED_LANGUAGES
+import torch
 
-router = APIRouter(prefix="/v0", tags=["translate"])
 
-def get_translate_manager(src_lang: str, tgt_lang: str, model_manager=Depends(get_model_manager)):
-    return model_manager.get_model(src_lang, tgt_lang)
+router = APIRouter(prefix="/v1", tags=["translate"])
 
-@router.post("/translate", response_model=TranslationResponse)
-async def translate(
-    request: TranslationRequest,
-    translate_manager=Depends(get_translate_manager),
-    ip=Depends(get_ip)
-):
+async def translate(request: TranslationRequest, translate_manager=Depends(get_model_manager)):
     input_sentences = request.sentences
     src_lang = request.src_lang
     tgt_lang = request.tgt_lang
@@ -24,6 +17,7 @@ async def translate(
     if not input_sentences:
         raise HTTPException(status_code=400, detail="Input sentences are required")
 
+    ip = get_ip()
     batch = ip.preprocess_batch(input_sentences, src_lang=src_lang, tgt_lang=tgt_lang)
     inputs = translate_manager.tokenizer(
         batch,
@@ -53,20 +47,14 @@ async def translate(
     translations = ip.postprocess_batch(generated_tokens, lang=tgt_lang)
     return TranslationResponse(translations=translations)
 
-router_v1 = APIRouter(prefix="/v1", tags=["translate"])
 
-@router_v1.post("/translate", response_model=TranslationResponse)
-async def translate_endpoint(request: TranslationRequest, model_manager=Depends(get_model_manager)):
+@router.post("/translate", response_model=TranslationResponse)
+async def translate_v1(request: TranslationRequest, translate_manager=Depends(get_model_manager)):
     logger.info(f"Received translation request: {request.dict()}")
     try:
-        translations = await perform_internal_translation(
-            sentences=request.sentences,
-            src_lang=request.src_lang,
-            tgt_lang=request.tgt_lang,
-            model_manager=model_manager
-        )
-        logger.info(f"Translation successful: {translations}")
-        return TranslationResponse(translations=translations)
+        response = await translate(request, translate_manager)
+        logger.info(f"Translation successful: {response.translations}")
+        return response
     except Exception as e:
         logger.error(f"Unexpected error during translation: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")

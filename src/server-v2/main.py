@@ -25,7 +25,7 @@ from models.schemas import (
 )
 from core.managers import registry, initialize_managers
 from routes.chat import router as chat_router
-from routes.translate import router as translate_router_v0, router_v1 as translate_router_v1
+from routes.translate import router as translate_router
 from routes.speech import router as speech_router
 from routes.health import router as health_router
 
@@ -117,8 +117,7 @@ app.state.limiter = limiter
 
 # Mount Routers
 app.include_router(chat_router)
-app.include_router(translate_router_v0)
-app.include_router(translate_router_v1)
+app.include_router(translate_router)
 app.include_router(speech_router)
 app.include_router(health_router)
 
