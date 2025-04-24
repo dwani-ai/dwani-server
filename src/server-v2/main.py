@@ -24,7 +24,8 @@ from models.schemas import (
     ChatRequest, ChatResponse, TranslationRequest, TranslationResponse,
     TranscriptionResponse
 )
-from core.managers import registry, initialize_managers
+from core.managers.initializer import initialize_managers
+from core.managers.registry import registry
 from routes.chat import router as chat_router
 from routes.translate import router as translate_router
 from routes.speech import router as speech_router
