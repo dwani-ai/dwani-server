@@ -26,6 +26,8 @@ from starlette.responses import StreamingResponse
 from logging_config import logger
 from tts_config import SPEED, ResponseFormat, config as tts_config
 import torchaudio
+import pytz
+from datetime import datetime
 
 # Device setup
 if torch.cuda.is_available():
@@ -51,7 +53,7 @@ else:
 
 # Settings
 class Settings(BaseSettings):
-    llm_model_name: str = "google/gemma-3-4b-it"
+    llm_model_name: str = "google/gemma-3-27b-it"
     max_tokens: int = 512
     host: str = "0.0.0.0"
     port: int = 7860
@@ -76,6 +78,23 @@ quantization_config = BitsAndBytesConfig(
     bnb_4bit_use_double_quant=True,
     bnb_4bit_compute_dtype=torch.bfloat16
 )
+from num2words import num2words
+def time_to_words():
+    """Convert current IST time to words (e.g., '4:04' to 'four hours and four minutes', '4:00' to 'four o'clock')."""
+    ist = pytz.timezone('Asia/Kolkata')
+    now = datetime.now(ist)
+    hour = now.hour % 12 or 12  # Convert 24-hour to 12-hour format (0 -> 12)
+    minute = now.minute
+    
+    # Convert hour to words
+    hour_word = num2words(hour, to='cardinal')
+    
+    # Handle minutes
+    if minute == 0:
+        return f"{hour_word} o'clock"
+    else:
+        minute_word = num2words(minute, to='cardinal')
+        return f"{hour_word} hours and {minute_word} minutes"
 
 # LLM Manager
 class LLMManager:
@@ -94,7 +113,7 @@ class LLMManager:
                 self.model = Gemma3ForConditionalGeneration.from_pretrained(
                     self.model_name,
                     device_map="auto",
-                    quantization_config=quantization_config,
+                    #quantization_config=quantization_config,
                     torch_dtype=self.torch_dtype
                 )
                 self.model.eval()
@@ -119,10 +138,11 @@ class LLMManager:
         if not self.is_loaded:
             self.load()
 
+        current_time = time_to_words()
         messages_vlm = [
             {
                 "role": "system",
-                "content": [{"type": "text", "text": "You are Dhwani, a helpful assistant. Answer questions considering India as base country and Karnataka as base state. Provide a concise response in one sentence maximum."}]
+                "content": [{"type": "text", "text":  f"You are Dhwani, a helpful assistant. Answer questions considering India as base country and Karnataka as base state. Provide a concise response in one sentence maximum. If the answer contains numerical digits, convert the digits into words.   If user asks the time , then return answer as {current_time}"}]
             },
             {
                 "role": "user",
@@ -357,11 +377,11 @@ class TranslateManager:
     def load(self):
         if not self.tokenizer or not self.model:
             if self.src_lang.startswith("eng") and not self.tgt_lang.startswith("eng"):
-                model_name = "ai4bharat/indictrans2-en-indic-dist-200M" if self.use_distilled else "ai4bharat/indictrans2-en-indic-1B"
+                model_name = "ai4bharat/indictrans2-en-indic-1B"
             elif not self.src_lang.startswith("eng") and self.tgt_lang.startswith("eng"):
-                model_name = "ai4bharat/indictrans2-indic-en-dist-200M" if self.use_distilled else "ai4bharat/indictrans2-indic-en-1B"
+                model_name = "ai4bharat/indictrans2-indic-en-1B"
             elif not self.src_lang.startswith("eng") and not self.tgt_lang.startswith("eng"):
-                model_name = "ai4bharat/indictrans2-indic-indic-dist-320M" if self.use_distilled else "ai4bharat/indictrans2-indic-indic-1B"
+                model_name = "ai4bharat/indictrans2-indic-indic-1B"
             else:
                 raise ValueError("Invalid language combination")
 
