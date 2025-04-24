@@ -3,8 +3,8 @@ from fastapi import HTTPException
 from logging_config import logger
 from settings import TranslationRequest, TranslationResponse
 from managers.translate_manager import TranslateManager, ModelManager
-from api.endpoints import translate
 from IndicTransToolkit import IndicProcessor
+import torch
 
 ip = IndicProcessor(inference=True)
 
@@ -18,8 +18,44 @@ SUPPORTED_LANGUAGES = {
     "por_Latn", "rus_Cyrl", "pol_Latn"
 }
 
-async def perform_internal_translation(sentences: List[str], src_lang: str, tgt_lang: str) -> List[str]:
-    from api.endpoints import model_manager
+async def translate(request: TranslationRequest, translate_manager: TranslateManager) -> TranslationResponse:
+    input_sentences = request.sentences
+    src_lang = request.src_lang
+    tgt_lang = request.tgt_lang
+
+    if not input_sentences:
+        raise HTTPException(status_code=400, detail="Input sentences are required")
+
+    batch = ip.preprocess_batch(input_sentences, src_lang=src_lang, tgt_lang=tgt_lang)
+    inputs = translate_manager.tokenizer(
+        batch,
+        truncation=True,
+        padding="longest",
+        return_tensors="pt",
+        return_attention_mask=True,
+    ).to(translate_manager.device)
+
+    with torch.no_grad():
+        generated_tokens = translate_manager.model.generate(
+            **inputs,
+            use_cache=True,
+            min_length=0,
+            max_length=256,
+            num_beams=5,
+            num_return_sequences=1,
+        )
+
+    with translate_manager.tokenizer.as_target_tokenizer():
+        generated_tokens = translate_manager.tokenizer.batch_decode(
+            generated_tokens.detach().cpu().tolist(),
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True,
+        )
+
+    translations = ip.postprocess_batch(generated_tokens, lang=tgt_lang)
+    return TranslationResponse(translations=translations)
+
+async def perform_internal_translation(sentences: List[str], src_lang: str, tgt_lang: str, model_manager: ModelManager) -> List[str]:
     try:
         translate_manager = model_manager.get_model(src_lang, tgt_lang)
     except ValueError as e:

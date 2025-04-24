@@ -17,7 +17,7 @@ from managers.tts_manager import TTSManager
 from managers.asr_manager import ASRModelManager
 from managers.translate_manager import TranslateManager, ModelManager
 from utils.tts_utils import synthesize_speech, EXAMPLES
-from utils.translation_utils import perform_internal_translation, SUPPORTED_LANGUAGES, ip
+from utils.translation_utils import perform_internal_translation, SUPPORTED_LANGUAGES
 
 # Initialize global managers (set in main.py)
 llm_manager: LLMManager = None
@@ -132,44 +132,6 @@ async def synthesize_kannada(request: KannadaSynthesizeRequest):
         headers={"Content-Disposition": "attachment; filename=synthesized_kannada_speech.wav"}
     )
 
-@app.post("/v0/translate", response_model=TranslationResponse)
-async def translate(request: TranslationRequest, translate_manager: TranslateManager = Depends(get_translate_manager)):
-    input_sentences = request.sentences
-    src_lang = request.src_lang
-    tgt_lang = request.tgt_lang
-
-    if not input_sentences:
-        raise HTTPException(status_code=400, detail="Input sentences are required")
-
-    batch = ip.preprocess_batch(input_sentences, src_lang=src_lang, tgt_lang=tgt_lang)
-    inputs = translate_manager.tokenizer(
-        batch,
-        truncation=True,
-        padding="longest",
-        return_tensors="pt",
-        return_attention_mask=True,
-    ).to(translate_manager.device)
-
-    with torch.no_grad():
-        generated_tokens = translate_manager.model.generate(
-            **inputs,
-            use_cache=True,
-            min_length=0,
-            max_length=256,
-            num_beams=5,
-            num_return_sequences=1,
-        )
-
-    with translate_manager.tokenizer.as_target_tokenizer():
-        generated_tokens = translate_manager.tokenizer.batch_decode(
-            generated_tokens.detach().cpu().tolist(),
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=True,
-        )
-
-    translations = ip.postprocess_batch(generated_tokens, lang=tgt_lang)
-    return TranslationResponse(translations=translations)
-
 @app.get("/v1/health")
 async def health_check():
     from settings import settings
@@ -208,7 +170,8 @@ async def translate_endpoint(request: TranslationRequest):
         translations = await perform_internal_translation(
             sentences=request.sentences,
             src_lang=request.src_lang,
-            tgt_lang=request.tgt_lang
+            tgt_lang=request.tgt_lang,
+            model_manager=model_manager
         )
         logger.info(f"Translation successful: {translations}")
         return TranslationResponse(translations=translations)
@@ -230,7 +193,8 @@ async def chat(request: Request, chat_request: ChatRequest):
             translated_prompt = await perform_internal_translation(
                 sentences=[chat_request.prompt],
                 src_lang=chat_request.src_lang,
-                tgt_lang="eng_Latn"
+                tgt_lang="eng_Latn",
+                model_manager=model_manager
             )
             prompt_to_process = translated_prompt[0]
             logger.info(f"Translated prompt to English: {prompt_to_process}")
@@ -246,7 +210,8 @@ async def chat(request: Request, chat_request: ChatRequest):
             translated_response = await perform_internal_translation(
                 sentences=[response],
                 src_lang="eng_Latn",
-                tgt_lang=chat_request.tgt_lang
+                tgt_lang=chat_request.tgt_lang,
+                model_manager=model_manager
             )
             final_response = translated_response[0]
             logger.info(f"Translated response to {chat_request.tgt_lang}: {final_response}")
@@ -275,7 +240,8 @@ async def visual_query(
             translated_query = await perform_internal_translation(
                 sentences=[query],
                 src_lang=src_lang,
-                tgt_lang="eng_Latn"
+                tgt_lang="eng_Latn",
+                model_manager=model_manager
             )
             query_to_process = translated_query[0]
             logger.info(f"Translated query to English: {query_to_process}")
@@ -290,7 +256,8 @@ async def visual_query(
             translated_answer = await perform_internal_translation(
                 sentences=[answer],
                 src_lang="eng_Latn",
-                tgt_lang=tgt_lang
+                tgt_lang=tgt_lang,
+                model_manager=model_manager
             )
             final_answer = translated_answer[0]
             logger.info(f"Translated answer to {tgt_lang}: {final_answer}")
@@ -330,7 +297,8 @@ async def chat_v2(
                 translated_prompt = await perform_internal_translation(
                     sentences=[prompt],
                     src_lang=src_lang,
-                    tgt_lang="eng_Latn"
+                    tgt_lang="eng_Latn",
+                    model_manager=model_manager
                 )
                 prompt_to_process = translated_prompt[0]
                 logger.info(f"Translated prompt to English: {prompt_to_process}")
@@ -345,7 +313,8 @@ async def chat_v2(
                 translated_response = await perform_internal_translation(
                     sentences=[decoded],
                     src_lang="eng_Latn",
-                    tgt_lang=tgt_lang
+                    tgt_lang=tgt_lang,
+                    model_manager=model_manager
                 )
                 final_response = translated_response[0]
                 logger.info(f"Translated response to {tgt_lang}: {final_response}")
@@ -357,7 +326,8 @@ async def chat_v2(
                 translated_prompt = await perform_internal_translation(
                     sentences=[prompt],
                     src_lang=src_lang,
-                    tgt_lang="eng_Latn"
+                    tgt_lang="eng_Latn",
+                    model_manager=model_manager
                 )
                 prompt_to_process = translated_prompt[0]
                 logger.info(f"Translated prompt to English: {prompt_to_process}")
@@ -366,14 +336,15 @@ async def chat_v2(
                 logger.info("Prompt already in English, no translation needed")
 
             from settings import settings
-            decoded = await llm_manager.generate(prompt_to_process, settings.max_tokens)
+            decoded = await LLMManager.generate(prompt_to_process, settings.max_tokens)
             logger.info(f"Generated English response: {decoded}")
 
             if tgt_lang != "eng_Latn":
                 translated_response = await perform_internal_translation(
                     sentences=[decoded],
                     src_lang="eng_Latn",
-                    tgt_lang=tgt_lang
+                    tgt_lang=tgt_lang,
+                    model_manager=model_manager
                 )
                 final_response = translated_response[0]
                 logger.info(f"Translated response to {tgt_lang}: {final_response}")
