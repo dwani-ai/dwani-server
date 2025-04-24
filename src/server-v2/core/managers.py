@@ -29,7 +29,7 @@ class ManagerRegistry:
 # Singleton registry instance
 registry = ManagerRegistry()
 
-# LLM Manager
+# LLM Manager (unchanged)
 class LLMManager:
     def __init__(self, model_name: str, device: str = device):
         self.model_name = model_name
@@ -207,10 +207,10 @@ class LLMManager:
         logger.info(f"Chat_v2 response: {decoded}")
         return decoded
 
+# Updated TTS Manager
 class TTSManager:
-    def __init__(self, device_type=device, ckpt_path=None):
+    def __init__(self, device_type=device):
         self.device_type = device_type
-        self.ckpt_path = ckpt_path
         self.model = None
         self.repo_id = "ai4bharat/IndicF5"
 
@@ -218,11 +218,10 @@ class TTSManager:
         if not self.model:
             logger.info("Loading TTS model IndicF5...")
             try:
-                from transformers_modules.ai4bharat.IndicF5.b82d286220e3070e171f4ef4b4bd047b9a447c9a.model import load_model
-                if not self.ckpt_path:
-                    raise ValueError("Checkpoint path (ckpt_path) is required for IndicF5 model")
-                self.model = load_model(self.ckpt_path)
-                self.model = torch.compile(self.model)
+                self.model = AutoModel.from_pretrained(
+                    self.repo_id,
+                    trust_remote_code=True
+                )
                 self.model = self.model.to(self.device_type)
                 logger.info("TTS model IndicF5 loaded")
             except Exception as e:
@@ -332,12 +331,10 @@ def initialize_managers(config_name: str, args):
     settings.chat_rate_limit = global_settings["chat_rate_limit"]
     settings.speech_rate_limit = global_settings["speech_rate_limit"]
 
-    tts_ckpt_path = selected_config["components"].get("TTS", {}).get("ckpt_path")
-
     registry.llm_manager = LLMManager(settings.llm_model_name)
     registry.model_manager = ModelManager()
     registry.asr_manager = ASRModelManager()
-    registry.tts_manager = TTSManager(ckpt_path=tts_ckpt_path)
+    registry.tts_manager = TTSManager()
 
     if selected_config["components"]["ASR"]:
         asr_model_name = selected_config["components"]["ASR"]["model"]
