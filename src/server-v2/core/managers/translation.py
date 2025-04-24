@@ -3,6 +3,8 @@ from fastapi import HTTPException
 from logging_config import logger
 from utils.device_utils import setup_device
 from config.constants import SUPPORTED_LANGUAGES
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+import torch
 
 class TranslateManager:
     def __init__(self, src_lang: str, tgt_lang: str, model_name: str):
@@ -15,9 +17,32 @@ class TranslateManager:
 
     def load(self):
         try:
-            logger.info(f"Loading translation model {self.model_name} for {self.src_lang} -> {self.tgt_lang}...")
-            self.model = True  # Placeholder for actual translation model loading
-            self.tokenizer = True
+            if not self.tokenizer or not self.model:
+                if self.src_lang.startswith("eng") and not self.tgt_lang.startswith("eng"):
+                    model_name = "ai4bharat/indictrans2-en-indic-1B"
+                elif not self.src_lang.startswith("eng") and self.tgt_lang.startswith("eng"):
+                    model_name = "ai4bharat/indictrans2-indic-en-1B"
+                elif not self.src_lang.startswith("eng") and not self.tgt_lang.startswith("eng"):
+                    model_name = "ai4bharat/indictrans2-indic-indic-1B"
+                else:
+                    raise ValueError("Invalid language combination")
+
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    model_name,
+                    trust_remote_code=True
+                )
+                self.model = AutoModelForSeq2SeqLM.from_pretrained(
+                    model_name,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float16,
+                    attn_implementation="flash_attention_2"
+                )
+                self.model = self.model.to(self.device_type)
+                self.model = torch.compile(self.model, mode="reduce-overhead")
+                logger.info(f"Translation model {model_name} loaded")
+                logger.info(f"Loading translation model {self.model_name} for {self.src_lang} -> {self.tgt_lang}...")
+            #self.model = True  # Placeholder for actual translation model loading
+            #self.tokenizer = True
             logger.info(f"Translation model {self.model_name} loaded successfully")
         except Exception as e:
             logger.error(f"Error loading translation model {self.model_name}: {str(e)}")

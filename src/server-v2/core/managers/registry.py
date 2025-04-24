@@ -9,7 +9,7 @@ class ManagerRegistry:
     model_manager: ModelManager = None
     asr_manager: ASRModelManager = None
     tts_manager: TTSManager = None
-    ip = None
+    ip :TranslateManager = None
     translation_configs: list = []
 
 registry = ManagerRegistry()
