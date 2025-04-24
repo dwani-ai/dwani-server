@@ -26,7 +26,7 @@ from models.schemas import (
 )
 from core.managers import registry, initialize_managers
 from routes.chat import router as chat_router
-from routes.translate import router as translate_router_v0, router_v1 as translate_router_v1
+from routes.translate import router as translate_router
 from routes.speech import router as speech_router
 from routes.health import router as health_router
 
@@ -53,23 +53,15 @@ async def lifespan(app: FastAPI):
             registry.asr_manager.load()
             logger.info("ASR model loaded successfully")
 
-            # Load translation models
-            translation_tasks = [
-                ('eng_Latn', 'kan_Knda', 'eng_indic'),
-                ('kan_Knda', 'eng_Latn', 'indic_eng'),
-                ('kan_Knda', 'hin_Deva', 'indic_indic'),
-            ]
-            
+            # Load translation models from config
             for config in registry.translation_configs:
                 src_lang = config.src_lang
                 tgt_lang = config.tgt_lang
+                model_name = config.model
                 key = registry.model_manager._get_model_key(src_lang, tgt_lang)
-                translation_tasks.append((src_lang, tgt_lang, key))
-
-            for src_lang, tgt_lang, key in translation_tasks:
-                logger.info(f"Loading translation model for {src_lang} -> {tgt_lang}...")
-                registry.model_manager.load_model(src_lang, tgt_lang, key)
-                logger.info(f"Translation model for {key} loaded successfully")
+                logger.info(f"Loading translation model {model_name} for {src_lang} -> {tgt_lang}...")
+                registry.model_manager.load_model(src_lang, tgt_lang, key, model_name)
+                logger.info(f"Translation model {model_name} for {key} loaded successfully")
 
             logger.info("All models loaded successfully")
         except Exception as e:
@@ -116,8 +108,7 @@ async def add_request_timing(request: Request, call_next):
 
 # Include routers
 app.include_router(chat_router)
-app.include_router(translate_router_v0)
-app.include_router(translate_router_v1)
+app.include_router(translate_router)
 app.include_router(speech_router)
 app.include_router(health_router)
 

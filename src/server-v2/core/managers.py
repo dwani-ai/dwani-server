@@ -82,14 +82,17 @@ class LLMManager:
             raise HTTPException(status_code=500, detail=f"Chat v2 failed: {str(e)}")
 
 class TTSManager:
-    def __init__(self):
+    def __init__(self, languages=None):
         self.model = None
         self.device = setup_device()
+        self.languages = languages  # Store TTS language configuration
 
     def load(self):
         try:
             logger.info("Loading TTS model...")
             self.model = True  # Placeholder for actual TTS model loading
+            if self.languages:
+                logger.info(f"TTS language config: {self.languages.language_code}, audio: {self.languages.audio_name}")
             logger.info("TTS model loaded successfully")
         except Exception as e:
             logger.error(f"Error loading TTS model: {str(e)}")
@@ -102,21 +105,22 @@ class TTSManager:
             logger.info("TTS model unloaded")
 
 class TranslateManager:
-    def __init__(self, src_lang: str, tgt_lang: str):
+    def __init__(self, src_lang: str, tgt_lang: str, model_name: str):
         self.src_lang = src_lang
         self.tgt_lang = tgt_lang
+        self.model_name = model_name
         self.model = None
         self.tokenizer = None
         self.device_type = setup_device()
 
     def load(self):
         try:
-            logger.info(f"Loading translation model for {self.src_lang} -> {self.tgt_lang}...")
+            logger.info(f"Loading translation model {self.model_name} for {self.src_lang} -> {self.tgt_lang}...")
             self.model = True  # Placeholder for actual translation model loading
             self.tokenizer = True
-            logger.info(f"Translation model loaded successfully")
+            logger.info(f"Translation model {self.model_name} loaded successfully")
         except Exception as e:
-            logger.error(f"Error loading translation model: {str(e)}")
+            logger.error(f"Error loading translation model {self.model_name}: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to load translation model: {str(e)}")
 
 class ModelManager:
@@ -134,13 +138,13 @@ class ModelManager:
         else:
             raise ValueError(f"Unsupported language pair: {src_lang} -> {tgt_lang}")
 
-    def load_model(self, src_lang: str, tgt_lang: str, key: str):
+    def load_model(self, src_lang: str, tgt_lang: str, key: str, model_name: str):
         try:
-            logger.info(f"Loading model for {key}...")
-            translate_manager = TranslateManager(src_lang, tgt_lang)
+            logger.info(f"Loading model {model_name} for {key}...")
+            translate_manager = TranslateManager(src_lang, tgt_lang, model_name)
             translate_manager.load()
             self.models[key] = translate_manager
-            logger.info(f"Model for {key} loaded successfully")
+            logger.info(f"Model {model_name} for {key} loaded successfully")
         except Exception as e:
             logger.error(f"Error loading model for {key}: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to load model for {key}: {str(e)}")
@@ -177,7 +181,7 @@ def initialize_managers(config_name: str, args):
     Initialize managers based on the specified configuration.
     
     Args:
-        config_name (str): Name of the configuration (e.g., config_two).
+        config_name (str): Name of the configuration (e.g., config_one).
         args: Command-line arguments containing host, port, and config.
     """
     # Load and validate configuration
@@ -197,7 +201,7 @@ def initialize_managers(config_name: str, args):
     registry.llm_manager = LLMManager(settings.llm_model_name)
     registry.model_manager = ModelManager()
     registry.asr_manager = ASRModelManager()
-    registry.tts_manager = TTSManager()
+    registry.tts_manager = TTSManager(languages=selected_config.components["TTS"].languages)
 
     if selected_config.components.get("ASR"):
         asr_config = selected_config.components["ASR"]

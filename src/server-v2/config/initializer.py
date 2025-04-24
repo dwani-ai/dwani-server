@@ -1,6 +1,6 @@
 # config/initializer.py
 from pydantic import BaseModel, Field, ValidationError
-from typing import Dict, List
+from typing import Dict, List, Optional
 from logging_config import logger
 from fastapi import HTTPException
 import json
@@ -13,29 +13,51 @@ class LLMConfig(BaseModel):
 class ASRConfig(BaseModel):
     model: str = Field(..., description="ASR model name")
     language_code: str = Field(..., description="Language code for ASR")
+    decoding: Optional[str] = Field(None, description="Decoding method for ASR")
 
 class TranslationConfig(BaseModel):
+    type: str = Field(..., description="Translation model type (e.g., eng_indic)")
+    model: str = Field(..., description="Translation model name")
     src_lang: str = Field(..., description="Source language code")
     tgt_lang: str = Field(..., description="Target language code")
 
+class TTSLanguageConfig(BaseModel):
+    language_code: str = Field(..., description="Language code for TTS")
+    audio_name: str = Field(..., description="Reference audio name")
+    audio_url: str = Field(..., description="URL for reference audio")
+    ref_text: str = Field(..., description="Reference text for TTS")
+    synth_text: str = Field(..., description="Synthesized text example")
+
 class TTSConfig(BaseModel):
-    pass  # Empty for now, as TTSManager doesn't require config
+    model: str = Field(..., description="TTS model name")
+    languages: TTSLanguageConfig = Field(..., description="Language-specific TTS configuration")
 
 class ConfigEntry(BaseModel):
     language: str = Field(..., description="Primary language for the config")
     components: Dict[str, LLMConfig | ASRConfig | TTSConfig | List[TranslationConfig]] = Field(
         ..., description="Component configurations"
     )
+    description: Optional[str] = Field(None, description="Configuration description")
+    hardware: Optional[str] = Field(None, description="Hardware specification")
+    variant: Optional[str] = Field(None, description="Configuration variant")
+
+    class Config:
+        extra = "allow"  # Allow extra fields like description, hardware, variant
 
 class GlobalSettings(BaseModel):
     host: str = Field(default="0.0.0.0", description="Server host")
-    port: int = Field(default=7861, ge=1, le=65535, description="Server port")
+    port: int = Field(default=7860, ge=1, le=65535, description="Server port")
     chat_rate_limit: str = Field(default="100/minute", description="Rate limit for chat endpoints")
-    speech_rate_limit: str = Field(default="100/minute", description="Rate limit for speech endpoints")
+    speech_rate_limit: str = Field(default="5/minute", description="Rate limit for speech endpoints")
+    device: Optional[str] = Field(None, description="Device type (e.g., cuda)")
+    dtype: Optional[str] = Field(None, description="Data type (e.g., bfloat16)")
+
+    class Config:
+        extra = "allow"  # Allow extra fields
 
 class DhwaniConfig(BaseModel):
     global_settings: GlobalSettings = Field(..., description="Global server settings")
-    configs: Dict[str, ConfigEntry] = Field(..., description="Named configurations (e.g., config_two)")
+    configs: Dict[str, ConfigEntry] = Field(..., description="Named configurations (e.g., config_one, config_two)")
 
 def load_dhwani_config(config_path: str = "dhwani_config.json") -> DhwaniConfig:
     """
@@ -75,7 +97,7 @@ def get_config(config_name: str, config: DhwaniConfig) -> ConfigEntry:
     Retrieve a specific configuration by name.
     
     Args:
-        config_name (str): Name of the configuration (e.g., config_two).
+        config_name (str): Name of the configuration (e.g., config_one).
         config (DhwaniConfig): Loaded configuration object.
     
     Returns:
