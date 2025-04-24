@@ -154,3 +154,8 @@ python src/server/main.py --host 0.0.0.0 --port 7860 --config config_two
     FFmpeg Not Found: Install FFmpeg and ensure it’s in your PATH.
     Permission Denied: Run with sudo if accessing restricted ports (e.g., < 1024).
 
+
+
+- 
+find . -name "*.pyc" -delete
+find . -name "__pycache__" -type d -exec rm -rf {} +
