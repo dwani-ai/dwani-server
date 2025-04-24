@@ -3,8 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from logging_config import logger
 from models.schemas import TranslationRequest, TranslationResponse
-from main import get_model_manager, get_ip
-from utils.translation_utils import perform_internal_translation  # Updated import
+from core.dependencies import get_model_manager, get_ip  # Updated import
+from utils.translation_utils import perform_internal_translation
 
 router = APIRouter(prefix="/v0", tags=["translate"])
 

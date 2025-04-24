@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from starlette.responses import RedirectResponse
 from logging_config import logger
-from main import get_llm_manager, get_settings
+from core.dependencies import get_llm_manager, get_settings  # Updated import
 
 router = APIRouter(prefix="/v1", tags=["health"])
 

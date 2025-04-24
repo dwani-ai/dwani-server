@@ -2,9 +2,9 @@
 from typing import List
 from logging_config import logger
 from models.schemas import TranslationRequest, TranslationResponse
-from main import get_model_manager, get_ip
+from core.dependencies import get_model_manager, get_ip  # Updated import
 from fastapi import Depends, HTTPException
-import torch
+
 async def perform_internal_translation(
     sentences: List[str],
     src_lang: str,

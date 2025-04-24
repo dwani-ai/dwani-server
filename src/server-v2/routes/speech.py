@@ -12,7 +12,7 @@ from models.schemas import TranscriptionResponse, KannadaSynthesizeRequest, Chat
 from config.constants import EXAMPLES, LANGUAGE_TO_SCRIPT
 from utils.audio_utils import load_audio_from_url
 from .chat import chat
-from main import get_tts_manager, get_asr_manager, get_llm_manager, get_settings
+from core.dependencies import get_tts_manager, get_asr_manager, get_llm_manager, get_settings  # Updated import
 
 router = APIRouter(prefix="/v1", tags=["speech"])
 
