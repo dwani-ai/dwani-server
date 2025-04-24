@@ -6,7 +6,7 @@ from typing import List
 from PIL import Image
 import io
 from logging_config import logger
-from models import ChatRequest, ChatResponse
+from models.schemas import ChatRequest, ChatResponse
 from config.constants import SUPPORTED_LANGUAGES
 from .translate import perform_internal_translation
 from main import get_llm_manager, get_settings
