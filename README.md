@@ -155,7 +155,120 @@ python src/server/main.py --host 0.0.0.0 --port 7860 --config config_two
     Permission Denied: Run with sudo if accessing restricted ports (e.g., < 1024).
 
 
+-- 
+### Projet Structure
 
-- 
+
+```mermaid
+classDiagram
+    class FastAPI {
+        +title: str
+        +description: str
+        +version: str
+        +lifespan: asynccontextmanager
+        +add_middleware()
+        +include_router()
+    }
+
+    class ManagerRegistry {
+        +llm_manager: LLMManager
+        +model_manager: ModelManager
+        +asr_manager: ASRModelManager
+        +tts_manager: TTSManager
+        +ip: IndicProcessor
+        +translation_configs: list
+    }
+
+    class LLMManager {
+        -model_name: str
+        +load()
+        +unload()
+    }
+
+    class ModelManager {
+        +load_model(src_lang: str, tgt_lang: str, key: str, model_name: str)
+    }
+
+    class ASRModelManager {
+        -model: Any
+        -model_language: dict
+        -device: str
+        +load()
+        +unload()
+        +transcribe(wav: Tensor, language_code: str, decoding: str) str
+    }
+
+    class TTSManager {
+        -languages: dict
+        -model: Any
+        +load()
+        +unload()
+    }
+
+    class IndicProcessor {
+        +process()
+    }
+
+    class Settings {
+        +llm_model_name: str
+        +max_tokens: int
+        +host: str
+        +port: int
+        +chat_rate_limit: str
+        +speech_rate_limit: str
+    }
+
+    class SynthesizeRequest {
+        +text: str
+    }
+
+    class KannadaSynthesizeRequest {
+        +text: str
+    }
+
+    class TranscriptionResponse {
+        +text: str
+    }
+
+    class ChatRequest {
+        +prompt: str
+        +src_lang: str
+        +tgt_lang: str
+    }
+
+    %% Relationships
+    FastAPI --> ManagerRegistry : Uses via lifespan
+    FastAPI --> Settings : Uses via args
+    FastAPI --> SynthesizeRequest : Handles in routes
+    FastAPI --> KannadaSynthesizeRequest : Handles in routes
+    FastAPI --> TranscriptionResponse : Returns in routes
+    FastAPI --> ChatRequest : Handles in routes
+
+    ManagerRegistry o--> LLMManager : Contains
+    ManagerRegistry o--> ModelManager : Contains
+    ManagerRegistry o--> ASRModelManager : Contains
+    ManagerRegistry o--> TTSManager : Contains
+    ManagerRegistry o--> IndicProcessor : Contains
+
+    ASRModelManager --> Settings : Uses device
+    TTSManager --> SynthesizeRequest : Processes
+    TTSManager --> KannadaSynthesizeRequest : Processes
+    ASRModelManager --> TranscriptionResponse : Produces
+
+    LLMManager --> ChatRequest : Processes
+    ModelManager --> ChatRequest : Processes
+
+    %% Dependencies (from dependencies.py)
+    FastAPI --> LLMManager : Depends via get_llm_manager
+    FastAPI --> ModelManager : Depends via get_model_manager
+    FastAPI --> ASRModelManager : Depends via get_asr_manager
+    FastAPI --> TTSManager : Depends via get_tts_manager
+    FastAPI --> IndicProcessor : Depends via get_ip
+    FastAPI --> Settings : Depends via get_settings
+```
+
+
+---
+
 find . -name "*.pyc" -delete
 find . -name "__pycache__" -type d -exec rm -rf {} +
