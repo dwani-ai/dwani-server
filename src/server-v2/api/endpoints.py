@@ -342,22 +342,22 @@ async def chat_v2(
                 prompt_to_process = prompt
                 logger.info("Prompt already in English, no translation needed")
 
-            from settings import settings
-            decoded = await llm_manager.generate(prompt_to_process, settings.max_tokens)
-            logger.info(f"Generated English response: {decoded}")
+        from settings import settings
+        decoded = await llm_manager.generate(prompt_to_process, settings.max_tokens)
+        logger.info(f"Generated English response: {decoded}")
 
-            if tgt_lang != "eng_Latn":
-                translated_response = await perform_internal_translation(
-                    sentences=[decoded],
-                    src_lang="eng_Latn",
-                    tgt_lang=tgt_lang,
-                    model_manager=model_manager
-                )
-                final_response = translated_response[0]
-                logger.info(f"Translated response to {tgt_lang}: {final_response}")
-            else:
-                final_response = decoded
-                logger.info("Response kept in English, no translation needed")
+        if tgt_lang != "eng_Latn":
+            translated_response = await perform_internal_translation(
+                sentences=[decoded],
+                src_lang="eng_Latn",
+                tgt_lang=tgt_lang,
+                model_manager=model_manager
+            )
+            final_response = translated_response[0]
+            logger.info(f"Translated response to {tgt_lang}: {final_response}")
+        else:
+            final_response = decoded
+            logger.info("Response kept in English, no translation needed")
 
         return ChatResponse(response=final_response)
     except Exception as e:
@@ -387,10 +387,12 @@ async def transcribe_audio(file: UploadFile = File(...), language: str = Query(.
 async def speech_to_speech(
     request: Request,
     file: UploadFile = File(...),
-    language: str = Query(..., enum=list(asr_manager.model_language.keys())),
+    language: str = Query(...),
 ) -> StreamingResponse:
     if not tts_manager.model:
         raise HTTPException(status_code=503, detail="TTS model not loaded")
+    if language not in asr_manager.model_language:
+        raise HTTPException(status_code=400, detail=f"Unsupported language: {language}. Supported languages: {list(asr_manager.model_language.keys())}")
     transcription = await transcribe_audio(file, language)
     logger.info(f"Transcribed text: {transcription.text}")
 
