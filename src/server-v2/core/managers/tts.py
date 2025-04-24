@@ -18,7 +18,8 @@ class TTSManager:
                 self.repo_id,
                 trust_remote_code=True
             )
-            self.model = self.model.to(self.device_type)
+            device = self.device_type[0] if isinstance(self.device_type, tuple) else self.device_type
+            self.model = self.model.to(device)  # Use device instead of device_type
             if self.languages:
                 logger.info(f"TTS language config: {self.languages.language_code}, audio: {self.languages.audio_name}")
             logger.info("TTS model loaded successfully")
