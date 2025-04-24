@@ -2,6 +2,8 @@
 import io
 import tempfile
 import uvicorn
+from typing import List
+
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, Body, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
