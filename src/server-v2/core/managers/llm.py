@@ -4,8 +4,8 @@ from transformers import AutoTokenizer, Gemma3ForConditionalGeneration
 from fastapi import HTTPException
 from PIL import Image
 from logging_config import logger
-from ...config.settings import settings
-from ...utils.device_utils import setup_device
+from config.settings import settings
+from utils.device_utils import setup_device
 
 class LLMManager:
     def __init__(self, model_name: str):

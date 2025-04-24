@@ -2,7 +2,7 @@
 import torch
 from fastapi import HTTPException
 from logging_config import logger
-from ...utils.device_utils import setup_device
+from utils.device_utils import setup_device
 
 class ASRModelManager:
     def __init__(self):

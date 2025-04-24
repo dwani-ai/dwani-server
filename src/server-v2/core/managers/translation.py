@@ -1,8 +1,8 @@
 # core/managers/translation.py
 from fastapi import HTTPException
 from logging_config import logger
-from ...utils.device_utils import setup_device
-from ...config.constants import SUPPORTED_LANGUAGES
+from utils.device_utils import setup_device
+from config.constants import SUPPORTED_LANGUAGES
 
 class TranslateManager:
     def __init__(self, src_lang: str, tgt_lang: str, model_name: str):

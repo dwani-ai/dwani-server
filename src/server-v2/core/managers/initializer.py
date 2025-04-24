@@ -4,9 +4,8 @@ from .llm import LLMManager
 from .tts import TTSManager
 from .translation import ModelManager
 from .asr import ASRModelManager
-from ...config.settings import settings
-from ...config.initializer import load_dhwani_config, get_config
-from ... import logger
+from config.settings import settings
+from config.initializer import load_dhwani_config, get_config
 
 def initialize_managers(config_name: str, args):
     """
