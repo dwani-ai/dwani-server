@@ -15,7 +15,8 @@ from logging_config import logger
 from tts_config import SPEED, ResponseFormat, config as tts_config
 
 # Import extracted modules
-from config.settings import parse_arguments
+from config.settings import parse_arguments, settings
+from config.initializer import load_dhwani_config
 from config.constants import SUPPORTED_LANGUAGES, LANGUAGE_TO_SCRIPT, QUANTIZATION_CONFIG
 from utils.audio_utils import load_audio_from_url as load_audio_from_url_original
 from utils.tts_utils import load_audio_from_url, synthesize_speech, SynthesizeRequest, KannadaSynthesizeRequest, EXAMPLES
@@ -23,7 +24,8 @@ from models.schemas import (
     ChatRequest, ChatResponse, TranslationRequest, TranslationResponse,
     TranscriptionResponse
 )
-from core.managers import registry, initialize_managers
+from core.managers.initializer import initialize_managers
+from core.managers.registry import registry
 from routes.chat import router as chat_router
 from routes.translate import router as translate_router
 from routes.speech import router as speech_router
@@ -52,23 +54,15 @@ async def lifespan(app: FastAPI):
             registry.asr_manager.load()
             logger.info("ASR model loaded successfully")
 
-            # Load translation models
-            translation_tasks = [
-                ('eng_Latn', 'kan_Knda', 'eng_indic'),
-                ('kan_Knda', 'eng_Latn', 'indic_eng'),
-                ('kan_Knda', 'hin_Deva', 'indic_indic'),
-            ]
-            
+            # Load translation models from config
             for config in registry.translation_configs:
-                src_lang = config["src_lang"]
-                tgt_lang = config["tgt_lang"]
+                src_lang = config.src_lang
+                tgt_lang = config.tgt_lang
+                model_name = config.model
                 key = registry.model_manager._get_model_key(src_lang, tgt_lang)
-                translation_tasks.append((src_lang, tgt_lang, key))
-
-            for src_lang, tgt_lang, key in translation_tasks:
-                logger.info(f"Loading translation model for {src_lang} -> {tgt_lang}...")
-                registry.model_manager.load_model(src_lang, tgt_lang, key)
-                logger.info(f"Translation model for {key} loaded successfully")
+                logger.info(f"Loading translation model {model_name} for {src_lang} -> {tgt_lang}...")
+                registry.model_manager.load_model(src_lang, tgt_lang, key, model_name)
+                logger.info(f"Translation model {model_name} for {key} loaded successfully")
 
             logger.info("All models loaded successfully")
         except Exception as e:
@@ -83,25 +77,26 @@ async def lifespan(app: FastAPI):
     registry.llm_manager.unload()
     logger.info("Server shutdown complete")
 
-# FastAPI App
 app = FastAPI(
-    title="Dhwani API",
-    description="AI Chat API supporting Indian languages",
-    version="1.0.0",
-    redirect_slashes=False,
+    title="Indic Language Processing Server",
+    description="API for processing Indic languages with translation, speech, and chat capabilities",
+    version="2.0.0",
     lifespan=lifespan
 )
 
-# Add CORS Middleware
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Add Timing Middleware
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+
+# Add request timing middleware
 @app.middleware("http")
 async def add_request_timing(request: Request, call_next):
     start_time = time()
@@ -112,17 +107,16 @@ async def add_request_timing(request: Request, call_next):
     response.headers["X-Response-Time"] = f"{duration:.3f}"
     return response
 
-limiter = Limiter(key_func=get_remote_address)
-app.state.limiter = limiter
-
-# Mount Routers
+# Include routers
 app.include_router(chat_router)
 app.include_router(translate_router)
 app.include_router(speech_router)
 app.include_router(health_router)
 
-# Main Execution
 if __name__ == "__main__":
-    host = args.host
-    port = args.port
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="info"
+    )

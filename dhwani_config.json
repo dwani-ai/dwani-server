@@ -1,9 +1,9 @@
-{
-  "variant": "base",
-  "hardware": "NVIDIA H100",
+{ 
   "configs": {
     "config_one": {
       "description": "Kannada - Speech to Text",
+      "hardware": "NVIDIA 100",
+      "variant": "dwani-inference-large",
       "language": "kannada",
       "components": {
         "ASR": {
@@ -12,11 +12,8 @@
           "decoding": "rnnt"
         },
         "LLM": {
-          "model": "google/gemma-3-12b-it",
+          "model": "google/gemma-3-27b-it",
           "max_tokens": 512
-        },
-        "Vision": {
-          "model": "moondream2"
         },
         "Translation": [
           {
@@ -38,12 +35,23 @@
             "tgt_lang": "hin_Deva"
           }
         ],
-        "TTS": null
+        "TTS": {
+          "model": "ai4bharat/IndicF5",
+          "languages" :{
+          "language_code" : "kn_Knda",
+          "audio_name": "KAN_F (Happy)",
+          "audio_url": "https://github.com/AI4Bharat/IndicF5/raw/refs/heads/main/prompts/KAN_F_HAPPY_00001.wav",
+          "ref_text": "ನಮ್‌ ಫ್ರಿಜ್ಜಲ್ಲಿ  ಕೂಲಿಂಗ್‌ ಸಮಸ್ಯೆ ಆಗಿ ನಾನ್‌ ಭಾಳ ದಿನದಿಂದ ಒದ್ದಾಡ್ತಿದ್ದೆ, ಆದ್ರೆ ಅದ್ನೀಗ ಮೆಕಾನಿಕ್ ಆಗಿರೋ ನಿಮ್‌ ಸಹಾಯ್ದಿಂದ ಬಗೆಹರಿಸ್ಕೋಬೋದು ಅಂತಾಗಿ ನಿರಾಳ ಆಯ್ತು ನಂಗೆ.",
+          "synth_text": "ಚೆನ್ನೈನ ಶೇರ್ ಆಟೋ ಪ್ರಯಾಣಿಕರ ನಡುವೆ ಆಹಾರವನ್ನು ಹಂಚಿಕೊಂಡು ತಿನ್ನುವುದು ನನಗೆ ಮನಸ್ಸಿಗೆ ತುಂಬಾ ಒಳ್ಳೆಯದೆನಿಸುವ ವಿಷಯ."
+        }
+        }
       }
     },
     "config_two": {
       "description": "Kannada - Speech to Speech",
       "language": "kannada",
+      "hardware": "NVIDIA 100",
+      "variant": "dwani-inference-medium",
       "components": {
         "ASR": {
           "model": "ai4bharat/indic-conformer-600m-multilingual",
@@ -51,82 +59,38 @@
           "decoding": "rnnt"
         },
         "LLM": {
-          "model": "google/gemma-3-12b-it",
+          "model": "google/gemma-3-4b-it",
           "max_tokens": 512
-        },
-        "Vision": {
-          "model": "moondream2"
         },
         "Translation": [
           {
             "type": "eng_indic",
-            "model": "ai4bharat/indictrans2-en-indic-1B",
+            "model": "ai4bharat/indictrans2-en-indic-dist-200M",
             "src_lang": "eng_Latn",
             "tgt_lang": "kan_Knda"
           },
           {
             "type": "indic_eng",
-            "model": "ai4bharat/indictrans2-indic-1B",
+            "model": "ai4bharat/indictrans2-indic-en-dist-200M",
             "src_lang": "kan_Knda",
             "tgt_lang": "eng_Latn"
           },
           {
             "type": "indic_indic",
-            "model": "ai4bharat/indictrans2-indic-indic-1B",
+            "model": "ai4bharat/indictrans2-indic-indic-dist-320M",
             "src_lang": "kan_Knda",
             "tgt_lang": "hin_Deva"
           }
         ],
         "TTS": {
-          "model": "ai4bharat/indic-parler-tts",
-          "voice": "default_kannada_voice",
-          "speed": 1.0,
-          "response_format": "mp3"
+          "model": "ai4bharat/IndicF5",
+          "languages" :{
+          "language_code" : "kn_Knda",
+          "audio_name": "KAN_F (Happy)",
+          "audio_url": "https://github.com/AI4Bharat/IndicF5/raw/refs/heads/main/prompts/KAN_F_HAPPY_00001.wav",
+          "ref_text": "ನಮ್‌ ಫ್ರಿಜ್ಜಲ್ಲಿ  ಕೂಲಿಂಗ್‌ ಸಮಸ್ಯೆ ಆಗಿ ನಾನ್‌ ಭಾಳ ದಿನದಿಂದ ಒದ್ದಾಡ್ತಿದ್ದೆ, ಆದ್ರೆ ಅದ್ನೀಗ ಮೆಕಾನಿಕ್ ಆಗಿರೋ ನಿಮ್‌ ಸಹಾಯ್ದಿಂದ ಬಗೆಹರಿಸ್ಕೋಬೋದು ಅಂತಾಗಿ ನಿರಾಳ ಆಯ್ತು ನಂಗೆ.",
+          "synth_text": "ಚೆನ್ನೈನ ಶೇರ್ ಆಟೋ ಪ್ರಯಾಣಿಕರ ನಡುವೆ ಆಹಾರವನ್ನು ಹಂಚಿಕೊಂಡು ತಿನ್ನುವುದು ನನಗೆ ಮನಸ್ಸಿಗೆ ತುಂಬಾ ಒಳ್ಳೆಯದೆನಿಸುವ ವಿಷಯ."
         }
-      }
-    },
-    "config_three": {
-      "description": "German - Speech to Text",
-      "language": "german",
-      "components": {
-        "ASR": {
-          "model": "openai/whisper",
-          "language_code": "de",
-          "decoding": "default"
-        },
-        "LLM": {
-          "model": "google/gemma-3-4b-it",
-          "max_tokens": 512
-        },
-        "Vision": {
-          "model": "moondream2"
-        },
-        "Translation": null,
-        "TTS": null
-      }
-    },
-    "config_four": {
-      "description": "German - Speech to Speech",
-      "language": "german",
-      "components": {
-        "ASR": {
-          "model": "openai/whisper",
-          "language_code": "de",
-          "decoding": "default"
-        },
-        "LLM": {
-          "model": "google/gemma-3-4b-it",
-          "max_tokens": 512
-        },
-        "Vision": {
-          "model": "moondream2"
-        },
-        "Translation": null,
-        "TTS": {
-          "model": "parler-tts",
-          "voice": "default_german_voice",
-          "speed": 1.0,
-          "response_format": "mp3"
         }
       }
     }
@@ -137,7 +101,6 @@
     "chat_rate_limit": "100/minute",
     "speech_rate_limit": "5/minute",
     "device": "cuda",
-    "dtype": "bfloat16",
-    "lazy_load": false
+    "dtype": "bfloat16"
   }
 }
