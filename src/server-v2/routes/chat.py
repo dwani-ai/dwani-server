@@ -111,7 +111,7 @@ async def visual_query(
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
     
 
-@router.post("vision/completions")
+@router.post("/vision/completions")
 async def visual_completion(
     image: UploadFile = File(...),
     prompt: str = Form(...),
@@ -133,3 +133,51 @@ async def visual_completion(
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    
+from typing import List   
+
+class MessageContentItem(BaseModel):
+    type: str
+    text: str = None
+    image: str = None
+
+class Message(BaseModel):
+    role: str
+    content: List[MessageContentItem]
+
+class ChatCompletionRequest(BaseModel):
+    model: str = "gemma3-4b-it"
+    messages: List[Message]
+    temperature: float = 0.7
+    max_tokens: int = 200
+
+@router.post("/v1/chat/completions")
+async def chat_completion(request: ChatCompletionRequest,llm_manager=Depends(get_llm_manager)):
+    try:
+        # Convert messages to processor format
+        hf_messages = []
+        for msg in request.messages:
+            content_items = []
+            for item in msg.content:
+                if item.type == "text":
+                    content_items.append({"type": "text", "text": item.text})
+                elif item.type == "image":
+                    content_items.append({"type": "image", "image": item.image})
+            hf_messages.append({"role": msg.role, "content": content_items})
+
+
+        response = await llm_manager.generate(request.messages, request.max_tokens)
+        logger.info(f"Generated response: {response}")
+
+        return {
+            "object": "chat.completion",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": response
+                }
+            }]
+        }   
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
