@@ -111,7 +111,7 @@ async def visual_query(
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
     
 
-@router.post("/v1/vision/completions")
+@router.post("vision/completions")
 async def visual_completion(
     image: UploadFile = File(...),
     prompt: str = Form(...),
@@ -126,7 +126,7 @@ async def visual_completion(
         image_data = await image.read()
         img = Image.open(io.BytesIO(image_data))
         
-        answer = await llm_manager.vision_completion(img, prompt)
+        answer = await llm_manager.vision_completion(img, prompt, max_tokens, temperature)
         logger.info(f"Generated English answer: {answer}")
 
         return {"answer": answer}
