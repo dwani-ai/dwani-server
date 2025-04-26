@@ -133,7 +133,7 @@ async def visual_completion(
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
-    
+'''    
 from typing import List   
 
 class MessageContentItem(BaseModel):
@@ -180,4 +180,97 @@ async def chat_completion(request: ChatCompletionRequest,llm_manager=Depends(get
         }   
 
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+'''
+from typing import List   
+import base64
+class MessageContentItem(BaseModel):
+    type: str  # "text" or "image"
+    text: str = None  # For text content
+    image: str = None  # For base64-encoded image data or URL
+    image_file: UploadFile = None  # For uploaded image files (optional)
+
+class Message(BaseModel):
+    role: str
+    content: List[MessageContentItem]
+
+class ChatCompletionRequest(BaseModel):
+    model: str = "gemma3-4b-it"
+    messages: List[Message]
+    temperature: float = 0.7
+    max_tokens: int = 200
+
+@router.post("/chat/completions")
+async def chat_completion(request: ChatCompletionRequest, llm_manager=Depends(get_llm_manager)):
+    try:
+        # Check if the request contains image content
+        has_image = any(
+            item.type == "image" and (item.image or item.image_file)
+            for msg in request.messages
+            for item in msg.content
+        )
+
+        # Convert messages to processor format
+        hf_messages = []
+        for msg in request.messages:
+            content_items = []
+            for item in msg.content:
+                if item.type == "text" and item.text:
+                    content_items.append({"type": "text", "text": item.text})
+                elif item.type == "image":
+                    if item.image_file:
+                        # Handle uploaded image file
+                        if not item.image_file.content_type.startswith('image/'):
+                            raise HTTPException(status_code=400, detail="File must be an image")
+                        image_data = await item.image_file.read()
+                        img = Image.open(io.BytesIO(image_data))
+                        content_items.append({"type": "image", "image": img})
+                    elif item.image:
+                        # Handle base64-encoded image or URL
+                        try:
+                            if item.image.startswith("data:image"):
+                                # Decode base64 image
+                                base64_string = item.image.split(",")[1]
+                                image_data = base64.b64decode(base64_string)
+                                img = Image.open(io.BytesIO(image_data))
+                                content_items.append({"type": "image", "image": img})
+                            else:
+                                # Assume image is a URL (handle via llm_manager if supported)
+                                content_items.append({"type": "image", "image": item.image})
+                        except Exception as e:
+                            raise HTTPException(status_code=400, detail=f"Invalid image data: {str(e)}")
+                    else:
+                        raise HTTPException(status_code=400, detail="Image data missing")
+                else:
+                    raise HTTPException(status_code=400, detail=f"Invalid content item type: {item.type}")
+            hf_messages.append({"role": msg.role, "content": content_items})
+
+        # Choose processing method based on content
+        if has_image:
+            # Use VLM processing (assumes llm_manager.vision_completion supports mixed content)
+            response = await llm_manager.vision_completion(
+                images=[item["image"] for msg in hf_messages for item in msg["content"] if item["type"] == "image"],
+                prompt="".join(item["text"] for msg in hf_messages for item in msg["content"] if item["type"] == "text"),
+                max_tokens=request.max_tokens,
+                temperature=request.temperature
+            )
+        else:
+            # Use text-only processing
+            response = await llm_manager.generate(hf_messages, request.max_tokens)
+
+        logger.info(f"Generated response: {response}")
+
+        return {
+            "object": "chat.completion",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": response
+                }
+            }]
+        }
+
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
