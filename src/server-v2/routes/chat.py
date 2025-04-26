@@ -62,95 +62,6 @@ async def chat(
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
-@router.post("/chat_v2", response_model=ChatResponse)
-@limiter.limit(lambda: get_settings().chat_rate_limit)
-async def chat_v2(
-    request: Request,
-    prompt: str = Form(...),
-    image: UploadFile = File(default=None),
-    src_lang: str = Form("kan_Knda"),
-    tgt_lang: str = Form("kan_Knda"),
-    llm_manager=Depends(get_llm_manager),
-    model_manager=Depends(get_model_manager),
-    settings=Depends(get_settings)
-):
-    if not prompt:
-        raise HTTPException(status_code=400, detail="Prompt cannot be empty")
-    if src_lang not in SUPPORTED_LANGUAGES or tgt_lang not in SUPPORTED_LANGUAGES:
-        raise HTTPException(status_code=400, detail=f"Unsupported language code. Supported codes: {', '.join(SUPPORTED_LANGUAGES)}")
-
-    logger.info(f"Received prompt: {prompt}, src_lang: {src_lang}, tgt_lang: {tgt_lang}, Image provided: {image is not None}")
-
-    try:
-        if image:
-            image_data = await image.read()
-            if not image_data:
-                raise HTTPException(status_code=400, detail="Uploaded image is empty")
-            img = Image.open(io.BytesIO(image_data))
-
-            if src_lang != "eng_Latn":
-                translated_prompt = await perform_internal_translation(
-                    sentences=[prompt],
-                    src_lang=src_lang,
-                    tgt_lang="eng_Latn",
-                    model_manager=model_manager
-                )
-                prompt_to_process = translated_prompt[0]
-                logger.info(f"Translated prompt to English: {prompt_to_process}")
-            else:
-                prompt_to_process = prompt
-                logger.info("Prompt already in English, no translation needed")
-
-            decoded = await llm_manager.chat_v2(img, prompt_to_process)
-            logger.info(f"Generated English response: {decoded}")
-
-            if tgt_lang != "eng_Latn":
-                translated_response = await perform_internal_translation(
-                    sentences=[decoded],
-                    src_lang="eng_Latn",
-                    tgt_lang=tgt_lang,
-                    model_manager=model_manager
-                )
-                final_response = translated_response[0]
-                logger.info(f"Translated response to {tgt_lang}: {final_response}")
-            else:
-                final_response = decoded
-                logger.info("Response kept in English, no translation needed")
-        else:
-            if src_lang != "eng_Latn":
-                translated_prompt = await perform_internal_translation(
-                    sentences=[prompt],
-                    src_lang=src_lang,
-                    tgt_lang="eng_Latn",
-                    model_manager=model_manager
-                )
-                prompt_to_process = translated_prompt[0]
-                logger.info(f"Translated prompt to English: {prompt_to_process}")
-            else:
-                prompt_to_process = prompt
-                logger.info("Prompt already in English, no translation needed")
-
-            decoded = await llm_manager.generate(prompt_to_process, settings.max_tokens)
-            logger.info(f"Generated English response: {decoded}")
-
-            if tgt_lang != "eng_Latn":
-                translated_response = await perform_internal_translation(
-                    sentences=[decoded],
-                    src_lang="eng_Latn",
-                    tgt_lang=tgt_lang,
-                    model_manager=model_manager
-                )
-                final_response = translated_response[0]
-                logger.info(f"Translated response to {tgt_lang}: {final_response}")
-            else:
-                final_response = decoded
-                logger.info("Response kept in English, no translation needed")
-
-        return ChatResponse(response=final_response)
-    except Exception as e:
-        logger.error(f"Error processing request: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
-
 @router.post("/visual_query/")
 async def visual_query(
     file: UploadFile = File(...),
@@ -195,6 +106,30 @@ async def visual_query(
             logger.info("Answer kept in English, no translation needed")
 
         return {"answer": final_answer}
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    
+
+@router.post("/v1/vision/completions")
+async def visual_completion(
+    image: UploadFile = File(...),
+    prompt: str = Form(...),
+    max_tokens: int = Form(200),
+    temperature: float = Form(0.7),
+    llm_manager=Depends(get_llm_manager)
+):
+    try:
+        if not image.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="File must be an image")
+
+        image_data = await image.read()
+        img = Image.open(io.BytesIO(image_data))
+        
+        answer = await llm_manager.vision_completion(img, prompt)
+        logger.info(f"Generated English answer: {answer}")
+
+        return {"answer": answer}
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
