@@ -151,7 +151,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: float = 0.7
     max_tokens: int = 200
 
-@router.post("/v1/chat/completions")
+@router.post("/chat/completions")
 async def chat_completion(request: ChatCompletionRequest,llm_manager=Depends(get_llm_manager)):
     try:
         # Convert messages to processor format
