@@ -73,10 +73,10 @@ python src/server/main.py --host 0.0.0.0 --port 7860 --config config_two
 5. Running the Server
     - Start the Server:
     ```bash
-    python src/server/main.py --port 7860 --host 0.0.0.0
+        python src/server/main.py --host 0.0.0.0 --port 7860 --config config_two
     ```
 
-    - The server starts quickly with lazy-loaded models.
+    - The server starts with models loaded on start
     - Access the interactive API docs at http://localhost:7860/docs.
     
     - (Optional) Load All Models:
