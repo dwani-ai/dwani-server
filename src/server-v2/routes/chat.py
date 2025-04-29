@@ -109,7 +109,55 @@ async def visual_query(
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
-    
+
+@router.post("/document_query/")
+async def document_query(
+    file: UploadFile = File(...),
+    query: str = Body(...),
+    src_lang: str = Query("kan_Knda", enum=list(SUPPORTED_LANGUAGES)),
+    tgt_lang: str = Query("kan_Knda", enum=list(SUPPORTED_LANGUAGES)),
+    llm_manager=Depends(get_llm_manager),
+    model_manager=Depends(get_model_manager)
+):
+    try:
+        image = Image.open(file.file)
+        if image.size == (0, 0):
+            raise HTTPException(status_code=400, detail="Uploaded image is empty or invalid")
+
+        if src_lang != "eng_Latn":
+            translated_query = await perform_internal_translation(
+                sentences=[query],
+                src_lang=src_lang,
+                tgt_lang="eng_Latn",
+                model_manager=model_manager
+            )
+            query_to_process = translated_query[0]
+            logger.info(f"Translated query to English: {query_to_process}")
+        else:
+            query_to_process = query
+            logger.info("Query already in English, no translation needed")
+
+        answer = await llm_manager.document_query(image, query_to_process)
+        logger.info(f"Generated English answer: {answer}")
+
+        if tgt_lang != "eng_Latn":
+            translated_answer = await perform_internal_translation(
+                sentences=[answer],
+                src_lang="eng_Latn",
+                tgt_lang=tgt_lang,
+                model_manager=model_manager
+            )
+            final_answer = translated_answer[0]
+            logger.info(f"Translated answer to {tgt_lang}: {final_answer}")
+        else:
+            final_answer = answer
+            logger.info("Answer kept in English, no translation needed")
+
+        return {"answer": final_answer}
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
 
 @router.post("/vision/completions")
 async def visual_completion(
