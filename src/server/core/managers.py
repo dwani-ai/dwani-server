@@ -19,11 +19,16 @@ import time
 from contextlib import nullcontext
 
 #logger = logging.getLogger(__name__)
+import torch
+from PIL import Image
+from typing import List, Dict, Any
+import logging
+import os
+import time
+from contextlib import nullcontext
+import asyncio
+import hashlib
 
-
-
-# Device setup
-device, torch_dtype = setup_device()
 
 def resize_image(image: Image.Image, max_size: int = 512) -> Image.Image:
     """Resize image to ensure consistent dimensions while preserving aspect ratio."""
@@ -31,6 +36,16 @@ def resize_image(image: Image.Image, max_size: int = 512) -> Image.Image:
     image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
     logger.debug(f"Resized image to max_size={max_size} in {time.time() - start_time:.3f}s")
     return image
+
+def get_image_hash(image: Image.Image) -> str:
+    """Generate a hash for an image to enable caching."""
+    image_bytes = image.convert("RGB").tobytes()
+    return hashlib.md5(image_bytes).hexdigest()
+
+
+# Device setup
+device, torch_dtype = setup_device()
+
 # Initialize settings
 settings = Settings()
 
@@ -469,6 +484,8 @@ class LLMManager:
                         results[idx] = ""
 
         return results
+
+
     async def document_query_batch(self, batch_items: List[Dict[str, Any]]) -> List[str]:
         """
         Process a batch of image/query pairs using the vision-language model (batched or sequential).
@@ -486,6 +503,9 @@ class LLMManager:
             self.load()
             logger.info(f"Loaded model: {self.model.__class__.__name__}, quantized={getattr(self.model, 'is_quantized', False)}")
 
+        # Image cache to avoid redundant preprocessing
+        image_cache = {}
+
         # Filter valid items and keep track of their indices
         valid_indices = []
         valid_images = []
@@ -501,9 +521,12 @@ class LLMManager:
             if not query or (image and (not isinstance(image, Image.Image) or image.size[0] <= 0 or image.size[1] <= 0)):
                 logger.warning(f"Invalid input for page {page_number}: query='{query}', image_valid={image is not None}")
                 continue
-            # Preprocess image
+            # Preprocess image with caching
             if image:
-                image = resize_image(image, max_size=int(os.getenv("IMAGE_MAX_SIZE", 512))).convert("RGB")
+                image_hash = get_image_hash(image)
+                if image_hash not in image_cache:
+                    image_cache[image_hash] = resize_image(image, max_size=int(os.getenv("IMAGE_MAX_SIZE", 256))).convert("RGB")
+                image = image_cache[image_hash]
             valid_indices.append(idx)
             valid_images.append(image)
             valid_queries.append(query)
@@ -536,8 +559,9 @@ class LLMManager:
             ])
 
         # Configure batch size
-        max_batch_size = int(os.getenv("MAX_BATCH_SIZE", 16))  # Default to 16
+        max_batch_size = int(os.getenv("MAX_BATCH_SIZE", 8))  # Default to 8
         disable_sub_batching = os.getenv("DISABLE_SUB_BATCHING", "false").lower() == "true"
+        batch_timeout = float(os.getenv("BATCH_TIMEOUT", 60))  # Timeout per sub-batch in seconds
         batch_size = len(valid_queries)
         sub_batch_sizes = [0] if disable_sub_batching else range(0, batch_size, max_batch_size)
 
@@ -550,26 +574,30 @@ class LLMManager:
             if not batch_messages:
                 continue
 
-            # Enable profiling for debugging
+            # Profiling disabled by default
             profiler = torch.profiler.profile(
                 activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
                 record_shapes=True
-            ) if os.getenv("PROFILE_INFERENCE", "true").lower() == "true" else nullcontext()
+            ) if os.getenv("PROFILE_INFERENCE", "false").lower() == "true" else nullcontext()
 
             with profiler:
                 try:
                     logger.info(f"Attempting batch processing for sub-batch {start_idx}-{end_idx} (pages {[pn for pn in batch_page_numbers]})")
                     start_time = time.time()
-                    # Try batched processing
-                    inputs_vlm = self.processor.apply_chat_template(
-                        batch_messages,
-                        add_generation_prompt=True,
-                        tokenize=True,
-                        return_dict=True,
-                        return_tensors="pt"
-                    )
+
+                    # Run batch processing with timeout
+                    try:
+                        inputs_vlm = await asyncio.wait_for(
+                            asyncio.to_thread(self.processor.apply_chat_template, batch_messages,
+                                            add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"),
+                            timeout=batch_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(f"Preprocessing timeout for sub-batch {start_idx}-{end_idx}")
+                        raise RuntimeError("Preprocessing timeout")
+
                     preprocess_time = time.time() - start_time
-                    logger.debug(f"Preprocessing took {preprocess_time:.3f}s for sub-batch {start_idx}-{end_idx}")
+                    logger.info(f"Preprocessing took {preprocess_time:.3f}s for sub-batch {start_idx}-{end_idx}")
 
                     # Move tensors to device with appropriate dtypes
                     for k in inputs_vlm:
@@ -592,7 +620,7 @@ class LLMManager:
                             temperature=0.7
                         )
                     generate_time = time.time() - start_time
-                    logger.debug(f"Generation took {generate_time:.3f}s for sub-batch {start_idx}-{end_idx}")
+                    logger.info(f"Generation took {generate_time:.3f}s for sub-batch {start_idx}-{end_idx}")
 
                     # Decode outputs
                     for i, (gen, input_len, idx, page_number) in enumerate(zip(generations, input_lens, batch_indices, batch_page_numbers)):
@@ -611,15 +639,13 @@ class LLMManager:
                         try:
                             logger.info(f"Attempting sequential processing for page {page_number}")
                             start_time = time.time()
-                            inputs_vlm = self.processor.apply_chat_template(
-                                [messages],
-                                add_generation_prompt=True,
-                                tokenize=True,
-                                return_dict=True,
-                                return_tensors="pt"
+                            inputs_vlm = await asyncio.wait_for(
+                                asyncio.to_thread(self.processor.apply_chat_template, [messages],
+                                                add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"),
+                                timeout=batch_timeout
                             )
                             preprocess_time = time.time() - start_time
-                            logger.debug(f"Sequential preprocessing took {preprocess_time:.3f}s for page {page_number}")
+                            logger.info(f"Sequential preprocessing took {preprocess_time:.3f}s for page {page_number}")
 
                             # Move tensors to device with appropriate dtypes
                             for k in inputs_vlm:
@@ -640,7 +666,7 @@ class LLMManager:
                                     temperature=0.7
                                 )
                             generate_time = time.time() - start_time
-                            logger.debug(f"Sequential generation took {generate_time:.3f}s for page {page_number}")
+                            logger.info(f"Sequential generation took {generate_time:.3f}s for page {page_number}")
 
                             output = generation[0][input_len:]
                             decoded = self.processor.decode(output, skip_special_tokens=True)
@@ -654,7 +680,8 @@ class LLMManager:
             if profiler is not nullcontext() and hasattr(profiler, "key_averages"):
                 logger.info(f"Profiling results: {profiler.key_averages().table(sort_by='cuda_time_total', row_limit=10)}")
 
-        return results    
+        return results
+    
     async def vision_completion(self, image: Image.Image, query: str, max_tokens: int, temperature: float) -> Dict[str, Any]:
         if not self.is_loaded:
             self.load()
