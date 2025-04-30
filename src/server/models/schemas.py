@@ -10,8 +10,8 @@ class ChatRequest(BaseModel):
 
     @field_validator("prompt")
     def prompt_must_be_valid(cls, v):
-        if len(v) > 1000:
-            raise ValueError("Prompt cannot exceed 1000 characters")
+        if len(v) > 100000:
+            raise ValueError("Prompt cannot exceed 100000 characters")
         return v.strip()
 
     @field_validator("src_lang", "tgt_lang")
