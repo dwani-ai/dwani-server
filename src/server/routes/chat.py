@@ -322,3 +322,124 @@ async def chat_completion(request: ChatCompletionRequest, llm_manager=Depends(ge
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+from typing import List
+import base64
+
+class BatchQueryItem(BaseModel):
+    image: str  # Base64-encoded image
+    query: str  # Text query for the image
+
+class BatchQueryRequest(BaseModel):
+    images: List[BatchQueryItem]
+    src_lang: str = "kan_Knda"
+    tgt_lang: str = "kan_Knda"
+
+    @field_validator("src_lang", "tgt_lang")
+    def validate_language(cls, v):
+        if v not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"Language {v} not supported. Supported languages: {SUPPORTED_LANGUAGES}")
+        return v
+
+@router.post("/document_query_batch/")
+async def document_query_batch(
+    request: BatchQueryRequest,
+    llm_manager=Depends(get_llm_manager),
+    model_manager=Depends(get_model_manager)
+):
+    """
+    Batch process multiple images with visual queries.
+
+    Args:
+        request: JSON payload containing:
+            - images: List of objects with base64-encoded images and queries
+            - src_lang: Source language code (e.g., 'eng_Latn')
+            - tgt_lang: Target language code (e.g., 'kan_Knda')
+
+    Returns:
+        JSONResponse: A dictionary containing:
+            - results: A list of extracted texts corresponding to each input image/query pair
+
+    Raises:
+        HTTPException: If processing fails or input is invalid.
+
+    Example:
+        ```json
+        {
+            "results": [
+                "Text from image 1",
+                "Text from image 2"
+            ]
+        }
+        ```
+    """
+    try:
+        if not request.images:
+            raise HTTPException(status_code=400, detail="No images provided for batch processing")
+
+        # Translate queries to English if src_lang is not eng_Latn
+        queries_to_process = []
+        if request.src_lang != "eng_Latn":
+            queries = [item.query for item in request.images]
+            translated_queries = await perform_internal_translation(
+                sentences=queries,
+                src_lang=request.src_lang,
+                tgt_lang="eng_Latn",
+                model_manager=model_manager
+            )
+            queries_to_process = translated_queries
+            logger.info(f"Translated queries to English: {translated_queries}")
+        else:
+            queries_to_process = [item.query for item in request.images]
+            logger.info("Queries already in English, no translation needed")
+
+        # Decode base64 images and prepare batch items
+        batch_items = []
+        for item, query in zip(request.images, queries_to_process):
+            try:
+                image_bytes = base64.b64decode(item.image)
+                image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                if image.size == (0, 0):
+                    raise ValueError("Image is empty or invalid")
+                batch_items.append({"image": image, "query": query})
+            except Exception as e:
+                logger.error(f"Failed to decode or open image: {str(e)}")
+                batch_items.append({"image": None, "query": query})
+
+        # Process batch with LLMManager
+        results = await llm_manager.document_query_batch(batch_items)
+        logger.info(f"Generated English results: {results}")
+
+        # Translate results to target language if tgt_lang is not eng_Latn
+        if request.tgt_lang != "eng_Latn":
+            # Filter out empty results to avoid translation errors
+            non_empty_results = [r for r in results if r]
+            if non_empty_results:
+                translated_results = await perform_internal_translation(
+                    sentences=non_empty_results,
+                    src_lang="eng_Latn",
+                    tgt_lang=request.tgt_lang,
+                    model_manager=model_manager
+                )
+                # Reconstruct results list with translated texts in the correct order
+                final_results = []
+                translated_idx = 0
+                for r in results:
+                    if r:
+                        final_results.append(translated_results[translated_idx])
+                        translated_idx += 1
+                    else:
+                        final_results.append("")
+                logger.info(f"Translated results to {request.tgt_lang}: {final_results}")
+            else:
+                final_results = results  # All results are empty, no translation needed
+        else:
+            final_results = results
+            logger.info("Results kept in English, no translation needed")
+
+        return {"results": final_results}
+
+    except Exception as e:
+        logger.error(f"Batch processing error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
