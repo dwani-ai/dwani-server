@@ -337,8 +337,8 @@ class LLMManager:
                 image = resize_image(image, max_size=1024).convert("RGB")
             valid_indices.append(idx)
             valid_images.append(image)
-            valid_queries.append(query)
             valid_page_numbers.append(page_number)
+            valid_queries.append(query)
 
         if not valid_queries:
             logger.info("No valid items to process in batch")
@@ -412,8 +412,9 @@ class LLMManager:
                 # Sequential fallback
                 for i, (messages, idx, page_number) in enumerate(zip(batch_messages, batch_indices, batch_page_numbers)):
                     try:
+                        # Process single message list
                         inputs_vlm = self.processor.apply_chat_template(
-                            messages,
+                            [messages],  # Wrap in list to match expected format
                             add_generation_prompt=True,
                             tokenize=True,
                             return_dict=True,
@@ -436,12 +437,12 @@ class LLMManager:
                             decoded = self.processor.decode(output, skip_special_tokens=True)
                             results[idx] = decoded
                             logger.info(f"Generated response for page {page_number} (sequential): {decoded[:100]}...")
-                        except Exception as e:
-                            logger.error(f"Error in sequential processing for page {page_number}: {str(e)}")
-                            results[idx] = ""
+                    except Exception as e:
+                        logger.error(f"Error in sequential processing for page {page_number}: {str(e)}")
+                        results[idx] = ""
 
         return results
-
+    
     async def vision_completion(self, image: Image.Image, query: str, max_tokens: int, temperature: float) -> Dict[str, Any]:
         if not self.is_loaded:
             self.load()
