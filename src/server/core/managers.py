@@ -10,13 +10,26 @@ from utils.time_utils import time_to_words
 from fastapi import HTTPException
 from PIL import Image
 from typing import List, Dict, Any
+import torch
+from PIL import Image
+from typing import List, Dict, Any
+#import logging
+import os
+import time
+from contextlib import nullcontext
+
+#logger = logging.getLogger(__name__)
+
+
 
 # Device setup
 device, torch_dtype = setup_device()
 
-def resize_image(image: Image.Image, max_size: int = 1024) -> Image.Image:
+def resize_image(image: Image.Image, max_size: int = 512) -> Image.Image:
     """Resize image to ensure consistent dimensions while preserving aspect ratio."""
+    start_time = time.time()
     image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+    logger.debug(f"Resized image to max_size={max_size} in {time.time() - start_time:.3f}s")
     return image
 # Initialize settings
 settings = Settings()
@@ -302,7 +315,7 @@ class LLMManager:
         return results
 
 
-    async def document_query_batch(self, batch_items: List[Dict[str, Any]]) -> List[str]:
+    async def document_query_batch_v2(self, batch_items: List[Dict[str, Any]]) -> List[str]:
         """
         Process a batch of image/query pairs using the vision-language model (batched or sequential).
 
@@ -454,6 +467,193 @@ class LLMManager:
                     except Exception as e:
                         logger.error(f"Error in sequential processing for page {page_number}: {str(e)}")
                         results[idx] = ""
+
+        return results
+    
+
+    async def document_query_batch(self, batch_items: List[Dict[str, Any]]) -> List[str]:
+        """
+        Process a batch of image/query pairs using the vision-language model (batched or sequential).
+
+        Args:
+            batch_items: List of dictionaries, each containing:
+                - image: PIL.Image.Image object (or None)
+                - query: str, the text query for the image
+                - page_number: int, the page number for tracking
+
+        Returns:
+            List[str]: List of decoded responses for each image/query pair, with empty strings for failed items.
+        """
+        if not self.is_loaded:
+            self.load()
+            logger.info(f"Loaded model: {self.model.__class__.__name__}, quantized={getattr(self.model, 'is_quantized', False)}")
+
+        # Filter valid items and keep track of their indices
+        valid_indices = []
+        valid_images = []
+        valid_queries = []
+        valid_page_numbers = []
+        results = [""] * len(batch_items)  # Pre-fill with empty strings
+
+        for idx, item in enumerate(batch_items):
+            image = item.get("image")
+            query = item.get("query", "")
+            page_number = item.get("page_number", idx + 1)
+            # Validate inputs
+            if not query or (image and (not isinstance(image, Image.Image) or image.size[0] <= 0 or image.size[1] <= 0)):
+                logger.warning(f"Invalid input for page {page_number}: query='{query}', image_valid={image is not None}")
+                continue
+            # Preprocess image
+            if image:
+                image = resize_image(image, max_size=int(os.getenv("IMAGE_MAX_SIZE", 512))).convert("RGB")
+            valid_indices.append(idx)
+            valid_images.append(image)
+            valid_queries.append(query)
+            valid_page_numbers.append(page_number)
+
+        if not valid_queries:
+            logger.info("No valid items to process in batch")
+            return results
+
+        # Log input summary
+        logger.info(f"Processing {len(valid_queries)} valid items for pages {[pn for pn in valid_page_numbers]}")
+
+        # Prepare batched messages
+        messages_vlm_batch = []
+        for image, query in zip(valid_images, valid_queries):
+            user_content = []
+            if image:
+                user_content.append({"type": "image", "image": image})
+            user_content.append({"type": "text", "text": query})
+
+            messages_vlm_batch.append([
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "You are Dhwani, a helpful assistant who is an expert in organising documents."}]
+                },
+                {
+                    "role": "user",
+                    "content": user_content
+                }
+            ])
+
+        # Configure batch size
+        max_batch_size = int(os.getenv("MAX_BATCH_SIZE", 8))  # Default to 8, adjustable
+        disable_sub_batching = os.getenv("DISABLE_SUB_BATCHING", "false").lower() == "true"
+        batch_size = len(valid_queries)
+        sub_batch_sizes = [batch_size] if disable_sub_batching else range(0, batch_size, max_batch_size)
+
+        # Process in sub-batches or single batch
+        for start_idx in sub_batch_sizes:
+            end_idx = batch_size if disable_sub_batching else min(start_idx + max_batch_size, batch_size)
+            batch_messages = messages_vlm_batch[start_idx:end_idx]
+            batch_indices = valid_indices[start_idx:end_idx]
+            batch_page_numbers = valid_page_numbers[start_idx:end_idx]
+            if not batch_messages:
+                continue
+
+            # Optional profiling
+            profiler = torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                record_shapes=True
+            ) if os.getenv("PROFILE_INFERENCE", "false").lower() == "true" else nullcontext()
+
+            with profiler:
+                try:
+                    logger.info(f"Attempting batch processing for sub-batch {start_idx}-{end_idx} (pages {[pn for pn in batch_page_numbers]})")
+                    start_time = time.time()
+                    # Try batched processing
+                    inputs_vlm = self.processor.apply_chat_template(
+                        batch_messages,
+                        add_generation_prompt=True,
+                        tokenize=True,
+                        return_dict=True,
+                        return_tensors="pt"
+                    )
+                    preprocess_time = time.time() - start_time
+                    logger.debug(f"Preprocessing took {preprocess_time:.3f}s for sub-batch {start_idx}-{end_idx}")
+
+                    # Move tensors to device with appropriate dtypes
+                    for k in inputs_vlm:
+                        if isinstance(inputs_vlm[k], torch.Tensor):
+                            dtype = torch.long if k == "input_ids" else torch.bfloat16
+                            inputs_vlm[k] = inputs_vlm[k].pin_memory().to(self.device, dtype=dtype, non_blocking=True)
+
+                    # Log tensor shapes and dtypes
+                    logger.debug(f"Sub-batch {start_idx}-{end_idx} tensor shapes: {[f'{k}: {v.shape}, {v.dtype}' for k, v in inputs_vlm.items() if isinstance(v, torch.Tensor)]}")
+
+                    input_lens = [ids.shape[-1] for ids in inputs_vlm["input_ids"]]
+
+                    # Generate for sub-batch
+                    start_time = time.time()
+                    with torch.inference_mode():
+                        generations = self.model.generate(
+                            **inputs_vlm,
+                            max_new_tokens=512,
+                            do_sample=True,
+                            temperature=0.7
+                        )
+                    generate_time = time.time() - start_time
+                    logger.debug(f"Generation took {generate_time:.3f}s for sub-batch {start_idx}-{end_idx}")
+
+                    # Decode outputs
+                    for i, (gen, input_len, idx, page_number) in enumerate(zip(generations, input_lens, batch_indices, batch_page_numbers)):
+                        try:
+                            output = gen[input_len:]
+                            decoded = self.processor.decode(output, skip_special_tokens=True)
+                            results[idx] = decoded
+                            logger.info(f"Generated response for page {page_number}: {decoded[:100]}...")
+                        except Exception as e:
+                            logger.error(f"Error in decoding for page {page_number}: {str(e)}")
+                            results[idx] = ""
+                except Exception as e:
+                    logger.warning(f"Batch processing failed for sub-batch {start_idx}-{end_idx}: {str(e)}. Falling back to sequential processing.")
+                    # Sequential fallback
+                    for i, (messages, idx, page_number) in enumerate(zip(batch_messages, batch_indices, batch_page_numbers)):
+                        try:
+                            logger.info(f"Attempting sequential processing for page {page_number}")
+                            start_time = time.time()
+                            inputs_vlm = self.processor.apply_chat_template(
+                                [messages],
+                                add_generation_prompt=True,
+                                tokenize=True,
+                                return_dict=True,
+                                return_tensors="pt"
+                            )
+                            preprocess_time = time.time() - start_time
+                            logger.debug(f"Sequential preprocessing took {preprocess_time:.3f}s for page {page_number}")
+
+                            # Move tensors to device with appropriate dtypes
+                            for k in inputs_vlm:
+                                if isinstance(inputs_vlm[k], torch.Tensor):
+                                    dtype = torch.long if k == "input_ids" else torch.bfloat16
+                                    inputs_vlm[k] = inputs_vlm[k].pin_memory().to(self.device, dtype=dtype, non_blocking=True)
+
+                            logger.debug(f"Sequential page {page_number} tensor shapes: {[f'{k}: {v.shape}, {v.dtype}' for k, v in inputs_vlm.items() if isinstance(v, torch.Tensor)]}")
+
+                            input_len = inputs_vlm["input_ids"].shape[-1]
+
+                            start_time = time.time()
+                            with torch.inference_mode():
+                                generation = self.model.generate(
+                                    **inputs_vlm,
+                                    max_new_tokens=512,
+                                    do_sample=True,
+                                    temperature=0.7
+                                )
+                            generate_time = time.time() - start_time
+                            logger.debug(f"Sequential generation took {generate_time:.3f}s for page {page_number}")
+
+                            output = generation[0][input_len:]
+                            decoded = self.processor.decode(output, skip_special_tokens=True)
+                            results[idx] = decoded
+                            logger.info(f"Generated response for page {page_number} (sequential): {decoded[:100]}...")
+                        except Exception as e:
+                            logger.error(f"Error in sequential processing for page {page_number}: {str(e)}")
+                            results[idx] = ""
+
+            if profiler is not nullcontext():
+                logger.info(f"Profiling results: {profiler.key_averages().table(sort_by='cuda_time_total', row_limit=10)}")
 
         return results
     
