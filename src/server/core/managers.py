@@ -18,7 +18,6 @@ def resize_image(image: Image.Image, max_size: int = 1024) -> Image.Image:
     """Resize image to ensure consistent dimensions while preserving aspect ratio."""
     image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
     return image
-
 # Initialize settings
 settings = Settings()
 
@@ -339,12 +338,15 @@ class LLMManager:
                 image = resize_image(image, max_size=1024).convert("RGB")
             valid_indices.append(idx)
             valid_images.append(image)
-            valid_page_numbers.append(page_number)
             valid_queries.append(query)
+            valid_page_numbers.append(page_number)
 
         if not valid_queries:
             logger.info("No valid items to process in batch")
             return results
+
+        # Log input summary
+        logger.info(f"Processing {len(valid_queries)} valid items for pages {[pn for pn in valid_page_numbers]}")
 
         # Prepare batched messages
         messages_vlm_batch = []
@@ -383,10 +385,15 @@ class LLMManager:
                     return_dict=True,
                     return_tensors="pt"
                 )
-                # Move tensors to device
+                # Move tensors to device with appropriate dtypes
                 for k in inputs_vlm:
                     if isinstance(inputs_vlm[k], torch.Tensor):
-                        inputs_vlm[k] = inputs_vlm[k].to(self.device, dtype=torch.bfloat16)
+                        # Keep input_ids as torch.Long, cast others to bfloat16
+                        dtype = torch.long if k == "input_ids" else torch.bfloat16
+                        inputs_vlm[k] = inputs_vlm[k].to(self.device, dtype=dtype)
+
+                # Log tensor shapes and dtypes
+                logger.debug(f"Sub-batch {start_idx}-{end_idx} tensor shapes: {[f'{k}: {v.shape}, {v.dtype}' for k, v in inputs_vlm.items() if isinstance(v, torch.Tensor)]}")
 
                 input_lens = [ids.shape[-1] for ids in inputs_vlm["input_ids"]]
 
@@ -405,7 +412,7 @@ class LLMManager:
                         output = gen[input_len:]
                         decoded = self.processor.decode(output, skip_special_tokens=True)
                         results[idx] = decoded
-                        logger.info(f"Generated response for page {page_number}: {decoded[:100]}...")  # Truncate for brevity
+                        logger.info(f"Generated response for page {page_number}: {decoded[:100]}...")
                     except Exception as e:
                         logger.error(f"Error in decoding for page {page_number}: {str(e)}")
                         results[idx] = ""
@@ -422,9 +429,14 @@ class LLMManager:
                             return_dict=True,
                             return_tensors="pt"
                         )
+                        # Move tensors to device with appropriate dtypes
                         for k in inputs_vlm:
                             if isinstance(inputs_vlm[k], torch.Tensor):
-                                inputs_vlm[k] = inputs_vlm[k].to(self.device, dtype=torch.bfloat16)
+                                dtype = torch.long if k == "input_ids" else torch.bfloat16
+                                inputs_vlm[k] = inputs_vlm[k].to(self.device, dtype=dtype)
+
+                        # Log tensor shapes and dtypes
+                        logger.debug(f"Sequential page {page_number} tensor shapes: {[f'{k}: {v.shape}, {v.dtype}' for k, v in inputs_vlm.items() if isinstance(v, torch.Tensor)]}")
 
                         input_len = inputs_vlm["input_ids"].shape[-1]
 
