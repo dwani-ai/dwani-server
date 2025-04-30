@@ -330,6 +330,7 @@ import base64
 class BatchQueryItem(BaseModel):
     image: str  # Base64-encoded image
     query: str  # Text query for the image
+    page_number: int  # Page number for tracking
 
 class BatchQueryRequest(BaseModel):
     images: List[BatchQueryItem]
@@ -349,17 +350,19 @@ async def document_query_batch(
     model_manager=Depends(get_model_manager)
 ):
     """
-    Batch process multiple images with visual queries.
+    Batch process multiple images with visual queries, including page numbers in the response.
 
     Args:
         request: JSON payload containing:
-            - images: List of objects with base64-encoded images and queries
+            - images: List of objects with base64-encoded images, queries, and page numbers
             - src_lang: Source language code (e.g., 'eng_Latn')
             - tgt_lang: Target language code (e.g., 'kan_Knda')
 
     Returns:
-        JSONResponse: A dictionary containing:
-            - results: A list of extracted texts corresponding to each input image/query pair
+        dict: A dictionary containing:
+            - results: A list of dictionaries, each with:
+                - page_number: The page number (1-based indexing)
+                - page_text: The extracted text for the corresponding image/query pair
 
     Raises:
         HTTPException: If processing fails or input is invalid.
@@ -368,8 +371,8 @@ async def document_query_batch(
         ```json
         {
             "results": [
-                "Text from image 1",
-                "Text from image 2"
+                {"page_number": 1, "page_text": "Text from image 1"},
+                {"page_number": 2, "page_text": "Text from image 2"}
             ]
         }
         ```
@@ -402,10 +405,10 @@ async def document_query_batch(
                 image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
                 if image.size == (0, 0):
                     raise ValueError("Image is empty or invalid")
-                batch_items.append({"image": image, "query": query})
+                batch_items.append({"image": image, "query": query, "page_number": item.page_number})
             except Exception as e:
-                logger.error(f"Failed to decode or open image: {str(e)}")
-                batch_items.append({"image": None, "query": query})
+                logger.error(f"Failed to decode or open image for page {item.page_number}: {str(e)}")
+                batch_items.append({"image": None, "query": query, "page_number": item.page_number})
 
         # Process batch with LLMManager
         results = await llm_manager.document_query_batch(batch_items)
@@ -415,6 +418,7 @@ async def document_query_batch(
         if request.tgt_lang != "eng_Latn":
             # Filter out empty results to avoid translation errors
             non_empty_results = [r for r in results if r]
+            non_empty_indices = [i for i, r in enumerate(results) if r]
             if non_empty_results:
                 translated_results = await perform_internal_translation(
                     sentences=non_empty_results,
@@ -423,14 +427,9 @@ async def document_query_batch(
                     model_manager=model_manager
                 )
                 # Reconstruct results list with translated texts in the correct order
-                final_results = []
-                translated_idx = 0
-                for r in results:
-                    if r:
-                        final_results.append(translated_results[translated_idx])
-                        translated_idx += 1
-                    else:
-                        final_results.append("")
+                final_results = [""] * len(results)
+                for idx, translated_text in zip(non_empty_indices, translated_results):
+                    final_results[idx] = translated_text
                 logger.info(f"Translated results to {request.tgt_lang}: {final_results}")
             else:
                 final_results = results  # All results are empty, no translation needed
@@ -438,7 +437,16 @@ async def document_query_batch(
             final_results = results
             logger.info("Results kept in English, no translation needed")
 
-        return {"results": final_results}
+        # Construct response with page numbers
+        response_results = [
+            {
+                "page_number": item["page_number"],
+                "page_text": final_results[idx]
+            }
+            for idx, item in enumerate(batch_items)
+        ]
+
+        return {"results": response_results}
 
     except Exception as e:
         logger.error(f"Batch processing error: {str(e)}")
