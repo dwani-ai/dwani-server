@@ -9,6 +9,7 @@ from utils.device_utils import setup_device
 from utils.time_utils import time_to_words
 from fastapi import HTTPException
 from PIL import Image
+from typing import List, Dict, Any
 
 # Device setup
 device, torch_dtype = setup_device()
@@ -29,7 +30,6 @@ class ManagerRegistry:
 # Singleton registry instance
 registry = ManagerRegistry()
 
-# LLM Manager (unchanged)
 class LLMManager:
     def __init__(self, model_name: str, device: str = device):
         self.model_name = model_name
@@ -207,11 +207,99 @@ class LLMManager:
         logger.info(f"Vision query response: {decoded}")
         return decoded
 
+    async def document_query_batch(self, batch_items: List[Dict[str, Any]]) -> List[str]:
+        """
+        Process a batch of image/query pairs using the vision-language model.
 
-    async def chat_completions():
-        pass 
+        Args:
+            batch_items: List of dictionaries, each containing:
+                - image: PIL.Image.Image object
+                - query: str, the text query for the image
 
-    async def vision_completion(self, image: Image.Image, query: str, max_tokens: int, temperature:float) -> str:
+        Returns:
+            List[str]: List of decoded responses for each image/query pair. Empty string for failed items.
+
+        Raises:
+            HTTPException: If processing fails critically (e.g., model not loaded, invalid inputs).
+        """
+        if not self.is_loaded:
+            self.load()
+
+        results = []
+        for item in batch_items:
+            image = item.get("image")
+            query = item.get("query", "")
+
+            # Validate inputs
+            if not query or (image and (not isinstance(image, Image.Image) or image.size[0] <= 0 or image.size[1] <= 0)):
+                logger.warning(f"Invalid input: query='{query}', image_valid={image is not None}")
+                results.append("")
+                continue
+
+            # Prepare messages for the vision-language model
+            messages_vlm = [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "You are Dhwani, a helpful assistant who is an expert in organising documents. "}]
+                },
+                {
+                    "role": "user",
+                    "content": []
+                }
+            ]
+
+            messages_vlm[1]["content"].append({"type": "text", "text": query})
+            if image:
+                messages_vlm[1]["content"].insert(0, {"type": "image", "image": image})
+                logger.info(f"Received valid image for processing in batch")
+            else:
+                logger.info("No valid image provided, processing text only in batch")
+
+            try:
+                # Apply chat template and prepare inputs
+                inputs_vlm = self.processor.apply_chat_template(
+                    messages_vlm,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt"
+                ).to(self.device, dtype=torch.bfloat16)
+            except Exception as e:
+                logger.error(f"Error in apply_chat_template for query '{query}': {str(e)}")
+                results.append("")
+                continue
+
+            input_len = inputs_vlm["input_ids"].shape[-1]
+
+            # Generate response
+            try:
+                with torch.inference_mode():
+                    generation = self.model.generate(
+                        **inputs_vlm,
+                        max_new_tokens=512,
+                        do_sample=True,
+                        temperature=0.7
+                    )
+                    generation = generation[0][input_len:]
+            except Exception as e:
+                logger.error(f"Error in model generation for query '{query}': {str(e)}")
+                results.append("")
+                continue
+
+            # Decode the output
+            try:
+                decoded = self.processor.decode(generation, skip_special_tokens=True)
+                logger.info(f"Batch vision query response: {decoded}")
+                results.append(decoded)
+            except Exception as e:
+                logger.error(f"Error in decoding for query '{query}': {str(e)}")
+                results.append("")
+
+        return results
+
+    async def vision_completion(self, image: Image.Image, query: str, max_tokens: int, temperature: float) -> Dict[str, Any]:
+        if not self.is_loaded:
+            self.load()
 
         messages = [
             {
@@ -247,7 +335,6 @@ class LLMManager:
             generation = generation[0][input_len:]
 
         response = self.processor.decode(generation, skip_special_tokens=True)
-   
 
         return {
             "object": "vision.completion",
@@ -259,7 +346,8 @@ class LLMManager:
             }]
         }
 
-
+    async def chat_completions(self):
+        pass
 
 # Updated TTS Manager
 class TTSManager:
