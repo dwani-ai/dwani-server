@@ -559,7 +559,7 @@ class LLMManager:
             ])
 
         # Configure batch size
-        max_batch_size = int(os.getenv("MAX_BATCH_SIZE", 8))  # Default to 8
+        max_batch_size = int(os.getenv("MAX_BATCH_SIZE", 16))  # Default to 8
         disable_sub_batching = os.getenv("DISABLE_SUB_BATCHING", "false").lower() == "true"
         batch_timeout = float(os.getenv("BATCH_TIMEOUT", 60))  # Timeout per sub-batch in seconds
         batch_size = len(valid_queries)
