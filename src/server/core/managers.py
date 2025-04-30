@@ -14,6 +14,11 @@ from typing import List, Dict, Any
 # Device setup
 device, torch_dtype = setup_device()
 
+def resize_image(image: Image.Image, max_size: int = 1024) -> Image.Image:
+    """Resize image to ensure consistent dimensions while preserving aspect ratio."""
+    image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+    return image
+
 # Initialize settings
 settings = Settings()
 
@@ -296,10 +301,7 @@ class LLMManager:
                 results.append("")
 
         return results
-    def resize_image(image: Image.Image, max_size: int = 1024) -> Image.Image:
-        """Resize image to ensure consistent dimensions while preserving aspect ratio."""
-        image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-        return image
+
 
     async def document_query_batch(self, batch_items: List[Dict[str, Any]]) -> List[str]:
         """
