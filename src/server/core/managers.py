@@ -469,8 +469,6 @@ class LLMManager:
                         results[idx] = ""
 
         return results
-    
-
     async def document_query_batch(self, batch_items: List[Dict[str, Any]]) -> List[str]:
         """
         Process a batch of image/query pairs using the vision-language model (batched or sequential).
@@ -538,10 +536,10 @@ class LLMManager:
             ])
 
         # Configure batch size
-        max_batch_size = int(os.getenv("MAX_BATCH_SIZE", 8))  # Default to 8, adjustable
+        max_batch_size = int(os.getenv("MAX_BATCH_SIZE", 16))  # Default to 16
         disable_sub_batching = os.getenv("DISABLE_SUB_BATCHING", "false").lower() == "true"
         batch_size = len(valid_queries)
-        sub_batch_sizes = [batch_size] if disable_sub_batching else range(0, batch_size, max_batch_size)
+        sub_batch_sizes = [0] if disable_sub_batching else range(0, batch_size, max_batch_size)
 
         # Process in sub-batches or single batch
         for start_idx in sub_batch_sizes:
@@ -552,11 +550,11 @@ class LLMManager:
             if not batch_messages:
                 continue
 
-            # Optional profiling
+            # Enable profiling for debugging
             profiler = torch.profiler.profile(
                 activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
                 record_shapes=True
-            ) if os.getenv("PROFILE_INFERENCE", "false").lower() == "true" else nullcontext()
+            ) if os.getenv("PROFILE_INFERENCE", "true").lower() == "true" else nullcontext()
 
             with profiler:
                 try:
@@ -652,11 +650,11 @@ class LLMManager:
                             logger.error(f"Error in sequential processing for page {page_number}: {str(e)}")
                             results[idx] = ""
 
-            if profiler is not nullcontext():
+            # Handle profiler output safely
+            if profiler is not nullcontext() and hasattr(profiler, "key_averages"):
                 logger.info(f"Profiling results: {profiler.key_averages().table(sort_by='cuda_time_total', row_limit=10)}")
 
-        return results
-    
+        return results    
     async def vision_completion(self, image: Image.Image, query: str, max_tokens: int, temperature: float) -> Dict[str, Any]:
         if not self.is_loaded:
             self.load()
