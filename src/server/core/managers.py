@@ -29,12 +29,7 @@ from contextlib import nullcontext
 import asyncio
 import hashlib
 
-quantization_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_use_double_quant=True,
-    bnb_4bit_compute_dtype=torch.bfloat16
-)
+
 def resize_image(image: Image.Image, max_size: int = 512) -> Image.Image:
     """Resize image to ensure consistent dimensions while preserving aspect ratio."""
     start_time = time.time()
@@ -66,6 +61,22 @@ class ManagerRegistry:
 
 # Singleton registry instance
 registry = ManagerRegistry()
+
+enable_quantization = os.getenv("ENABLE_QUANTIZATION", "false").lower() == "true"
+                
+# Set quantization config based on environment variable
+quantization_config = None
+if enable_quantization:
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16
+    )
+    logger.info("Quantization enabled via environment variable")
+else:
+    logger.info("Quantization disabled")
+
 
 class LLMManager:
     def __init__(self, model_name: str, device: str = device):
