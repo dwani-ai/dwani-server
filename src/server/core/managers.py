@@ -1,6 +1,6 @@
 # core/managers.py
 import torch
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, AutoProcessor, AutoModel, Gemma3ForConditionalGeneration
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, AutoProcessor, AutoModel, Gemma3ForConditionalGeneration, BitsAndBytesConfig
 from IndicTransToolkit import IndicProcessor
 from logging_config import logger
 from config.settings import Settings
@@ -29,7 +29,12 @@ from contextlib import nullcontext
 import asyncio
 import hashlib
 
-
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_compute_dtype=torch.bfloat16
+)
 def resize_image(image: Image.Image, max_size: int = 512) -> Image.Image:
     """Resize image to ensure consistent dimensions while preserving aspect ratio."""
     start_time = time.time()
@@ -78,7 +83,8 @@ class LLMManager:
                 self.model = Gemma3ForConditionalGeneration.from_pretrained(
                     self.model_name,
                     device_map="auto",
-                    torch_dtype=self.torch_dtype
+                    torch_dtype=self.torch_dtype,
+                    quantization_config=quantization_config,
                 )
                 self.model.eval()
                 self.processor = AutoProcessor.from_pretrained(self.model_name)
