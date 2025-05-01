@@ -451,3 +451,112 @@ async def document_query_batch(
     except Exception as e:
         logger.error(f"Batch processing error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    
+@router.post("/document_query_batch_v0/")
+async def document_query_batch(
+    request: BatchQueryRequest,
+    llm_manager=Depends(get_llm_manager),
+    model_manager=Depends(get_model_manager)
+):
+    """
+    Batch process multiple images with visual queries, including page numbers in the response.
+
+    Args:
+        request: JSON payload containing:
+            - images: List of objects with base64-encoded images, queries, and page numbers
+            - src_lang: Source language code (e.g., 'eng_Latn')
+            - tgt_lang: Target language code (e.g., 'kan_Knda')
+
+    Returns:
+        dict: A dictionary containing:
+            - results: A list of dictionaries, each with:
+                - page_number: The page number (1-based indexing)
+                - page_text: The extracted text for the corresponding image/query pair
+
+    Raises:
+        HTTPException: If processing fails or input is invalid.
+
+    Example:
+        ```json
+        {
+            "results": [
+                {"page_number": 1, "page_text": "Text from image 1"},
+                {"page_number": 2, "page_text": "Text from image 2"}
+            ]
+        }
+        ```
+    """
+    try:
+        if not request.images:
+            raise HTTPException(status_code=400, detail="No images provided for batch processing")
+
+        # Translate queries to English if src_lang is not eng_Latn
+        queries_to_process = []
+        if request.src_lang != "eng_Latn":
+            queries = [item.query for item in request.images]
+            translated_queries = await perform_internal_translation(
+                sentences=queries,
+                src_lang=request.src_lang,
+                tgt_lang="eng_Latn",
+                model_manager=model_manager
+            )
+            queries_to_process = translated_queries
+            logger.info(f"Translated queries to English: {translated_queries}")
+        else:
+            queries_to_process = [item.query for item in request.images]
+            logger.info("Queries already in English, no translation needed")
+
+        # Decode base64 images and prepare batch items
+        batch_items = []
+        for item, query in zip(request.images, queries_to_process):
+            try:
+                image_bytes = base64.b64decode(item.image)
+                image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                if image.size == (0, 0):
+                    raise ValueError("Image is empty or invalid")
+                batch_items.append({"image": image, "query": query, "page_number": item.page_number})
+            except Exception as e:
+                logger.error(f"Failed to decode or open image for page {item.page_number}: {str(e)}")
+                batch_items.append({"image": None, "query": query, "page_number": item.page_number})
+
+        # Process batch with LLMManager
+        results = await llm_manager.document_query_batch_old(batch_items)
+        logger.info(f"Generated English results: {results}")
+
+        # Translate results to target language if tgt_lang is not eng_Latn
+        if request.tgt_lang != "eng_Latn":
+            # Filter out empty results to avoid translation errors
+            non_empty_results = [r for r in results if r]
+            non_empty_indices = [i for i, r in enumerate(results) if r]
+            if non_empty_results:
+                translated_results = await perform_internal_translation(
+                    sentences=non_empty_results,
+                    src_lang="eng_Latn",
+                    tgt_lang=request.tgt_lang,
+                    model_manager=model_manager
+                )
+                # Reconstruct results list with translated texts in the correct order
+                final_results = [""] * len(results)
+                for idx, translated_text in zip(non_empty_indices, translated_results):
+                    final_results[idx] = translated_text
+                logger.info(f"Translated results to {request.tgt_lang}: {final_results}")
+            else:
+                final_results = results  # All results are empty, no translation needed
+        else:
+            final_results = results
+            logger.info("Results kept in English, no translation needed")
+
+        # Construct response with page numbers
+        response_results = [
+            {
+                "page_number": item["page_number"],
+                "page_text": final_results[idx]
+            }
+            for idx, item in enumerate(batch_items)
+        ]
+
+        return {"results": response_results}
+
+    except Exception as e:
+        logger.error(f"Batch processing error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
