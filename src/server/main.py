@@ -12,7 +12,6 @@ from time import time
 from contextlib import asynccontextmanager
 from typing import List
 from logging_config import logger
-from tts_config import SPEED, ResponseFormat, config as tts_config
 
 # Import extracted modules
 from config.settings import parse_arguments
