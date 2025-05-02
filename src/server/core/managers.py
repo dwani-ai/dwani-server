@@ -155,7 +155,7 @@ class LLMManager:
             generation = generation[0][input_len:]
 
         response = self.processor.decode(generation, skip_special_tokens=True)
-        logger.info(f"Generated response: {response}")
+        logger.debug(f"Generated response: {response}")
         return response
 
     async def vision_query(self, image: Image.Image, query: str) -> str:
@@ -176,9 +176,9 @@ class LLMManager:
         messages_vlm[1]["content"].append({"type": "text", "text": query})
         if image and image.size[0] > 0 and image.size[1] > 0:
             messages_vlm[1]["content"].insert(0, {"type": "image", "image": image})
-            logger.info(f"Received valid image for processing")
+            logger.debug(f"Received valid image for processing")
         else:
-            logger.info("No valid image provided, processing text only")
+            logger.debug("No valid image provided, processing text only")
 
         try:
             inputs_vlm = self.processor.apply_chat_template(
@@ -204,7 +204,7 @@ class LLMManager:
             generation = generation[0][input_len:]
 
         decoded = self.processor.decode(generation, skip_special_tokens=True)
-        logger.info(f"Vision query response: {decoded}")
+        logger.debug(f"Vision query response: {decoded}")
         return decoded
 
     async def document_query(self, image: Image.Image, query: str) -> str:
@@ -225,9 +225,9 @@ class LLMManager:
         messages_vlm[1]["content"].append({"type": "text", "text": query})
         if image and image.size[0] > 0 and image.size[1] > 0:
             messages_vlm[1]["content"].insert(0, {"type": "image", "image": image})
-            logger.info(f"Received valid image for processing")
+            logger.debug(f"Received valid image for processing")
         else:
-            logger.info("No valid image provided, processing text only")
+            logger.debug("No valid image provided, processing text only")
 
         try:
             inputs_vlm = self.processor.apply_chat_template(
@@ -253,7 +253,7 @@ class LLMManager:
             generation = generation[0][input_len:]
 
         decoded = self.processor.decode(generation, skip_special_tokens=True)
-        logger.info(f"Vision query response: {decoded}")
+        logger.debug(f"Vision query response: {decoded}")
         return decoded
     
     async def document_query_batch_old(self, batch_items: List[Dict[str, Any]]) -> List[str]:
@@ -300,9 +300,9 @@ class LLMManager:
             messages_vlm[1]["content"].append({"type": "text", "text": query})
             if image:
                 messages_vlm[1]["content"].insert(0, {"type": "image", "image": image})
-                logger.info(f"Received valid image for processing in batch")
+                logger.debug(f"Received valid image for processing in batch")
             else:
-                logger.info("No valid image provided, processing text only in batch")
+                logger.debug("No valid image provided, processing text only in batch")
 
             try:
                 # Apply chat template and prepare inputs
@@ -338,7 +338,7 @@ class LLMManager:
             # Decode the output
             try:
                 decoded = self.processor.decode(generation, skip_special_tokens=True)
-                logger.info(f"Batch vision query response: {decoded}")
+                logger.debug(f"Batch vision query response: {decoded}")
                 results.append(decoded)
             except Exception as e:
                 logger.error(f"Error in decoding for query '{query}': {str(e)}")
@@ -387,11 +387,11 @@ class LLMManager:
             valid_page_numbers.append(page_number)
 
         if not valid_queries:
-            logger.info("No valid items to process in batch")
+            logger.debug("No valid items to process in batch")
             return results
 
         # Log input summary
-        logger.info(f"Processing {len(valid_queries)} valid items for pages {[pn for pn in valid_page_numbers]}")
+        logger.debug(f"Processing {len(valid_queries)} valid items for pages {[pn for pn in valid_page_numbers]}")
 
         # Prepare batched messages
         messages_vlm_batch = []
@@ -457,7 +457,7 @@ class LLMManager:
                         output = gen[input_len:]
                         decoded = self.processor.decode(output, skip_special_tokens=True)
                         results[idx] = decoded
-                        logger.info(f"Generated response for page {page_number}: {decoded[:100]}...")
+                        logger.debug(f"Generated response for page {page_number}: {decoded[:100]}...")
                     except Exception as e:
                         logger.error(f"Error in decoding for page {page_number}: {str(e)}")
                         results[idx] = ""
@@ -495,7 +495,7 @@ class LLMManager:
                             output = generation[0][input_len:]
                             decoded = self.processor.decode(output, skip_special_tokens=True)
                             results[idx] = decoded
-                            logger.info(f"Generated response for page {page_number} (sequential): {decoded[:100]}...")
+                            logger.debug(f"Generated response for page {page_number} (sequential): {decoded[:100]}...")
                     except Exception as e:
                         logger.error(f"Error in sequential processing for page {page_number}: {str(e)}")
                         results[idx] = ""

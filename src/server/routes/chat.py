@@ -148,10 +148,10 @@ async def document_query(
                 model_manager=model_manager
             )
             final_answer = translated_answer[0]
-            logger.info(f"Translated answer to {tgt_lang}: {final_answer}")
+            logger.debug(f"Translated answer to {tgt_lang}: {final_answer}")
         else:
             final_answer = answer
-            logger.info("Answer kept in English, no translation needed")
+            logger.debug("Answer kept in English, no translation needed")
 
         return {"answer": final_answer}
     except Exception as e:
@@ -307,7 +307,7 @@ async def chat_completion(request: ChatCompletionRequest, llm_manager=Depends(ge
             # Use text-only processing
             response = await llm_manager.generate(hf_messages, request.max_tokens)
 
-        logger.info(f"Generated response: {response}")
+        logger.debug(f"Generated response: {response}")
 
         return {
             "object": "chat.completion",
