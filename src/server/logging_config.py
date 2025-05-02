@@ -32,4 +32,4 @@ logging_config = {
 }
 
 logging.config.dictConfig(logging_config)
-logger = logging.getLogger("indic_all_server")
+logger = logging.getLogger("dwani.ai - server")

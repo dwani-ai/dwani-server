@@ -50,10 +50,10 @@ async def translate(request: TranslationRequest, translate_manager=Depends(get_m
 
 @router.post("/translate", response_model=TranslationResponse)
 async def translate_v1(request: TranslationRequest, translate_manager=Depends(get_model_manager)):
-    logger.info(f"Received translation request: {request.dict()}")
+    logger.debug(f"Received translation request: {request.dict()}")
     try:
         response = await translate(request, translate_manager)
-        logger.info(f"Translation successful: {response.translations}")
+        logger.debug(f"Translation successful: {response.translations}")
         return response
     except Exception as e:
         logger.error(f"Unexpected error during translation: {str(e)}")

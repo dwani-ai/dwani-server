@@ -25,7 +25,7 @@ async def chat(
 ):
     if not chat_request.prompt:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
-    logger.info(f"Received prompt: {chat_request.prompt}, src_lang: {chat_request.src_lang}, tgt_lang: {chat_request.tgt_lang}")
+    logger.debug(f"Received prompt: {chat_request.prompt}, src_lang: {chat_request.src_lang}, tgt_lang: {chat_request.tgt_lang}")
     
     try:
         if chat_request.src_lang != "eng_Latn" :# and chat_request.src_lang not in EUROPEAN_LANGUAGES:
@@ -36,13 +36,13 @@ async def chat(
                 model_manager=model_manager
             )
             prompt_to_process = translated_prompt[0]
-            logger.info(f"Translated prompt to English: {prompt_to_process}")
+            logger.debug(f"Translated prompt to English: {prompt_to_process}")
         else:
             prompt_to_process = chat_request.prompt
-            logger.info("Prompt in English or European language, no translation needed")
+            logger.debug("Prompt in English or European language, no translation needed")
 
         response = await llm_manager.generate(prompt_to_process, settings.max_tokens)
-        logger.info(f"Generated response: {response}")
+        logger.debug(f"Generated response: {response}")
 
         if chat_request.tgt_lang != "eng_Latn" :# and chat_request.tgt_lang not in EUROPEAN_LANGUAGES:
             translated_response = await perform_internal_translation(
@@ -52,10 +52,10 @@ async def chat(
                 model_manager=model_manager
             )
             final_response = translated_response[0]
-            logger.info(f"Translated response to {chat_request.tgt_lang}: {final_response}")
+            logger.debug(f"Translated response to {chat_request.tgt_lang}: {final_response}")
         else:
             final_response = response
-            logger.info(f"Response in {chat_request.tgt_lang}, no translation needed")
+            logger.debug(f"Response in {chat_request.tgt_lang}, no translation needed")
 
         return ChatResponse(response=final_response)
     except Exception as e:
@@ -84,13 +84,13 @@ async def visual_query(
                 model_manager=model_manager
             )
             query_to_process = translated_query[0]
-            logger.info(f"Translated query to English: {query_to_process}")
+            logger.debug(f"Translated query to English: {query_to_process}")
         else:
             query_to_process = query
-            logger.info("Query already in English, no translation needed")
+            logger.debug("Query already in English, no translation needed")
 
         answer = await llm_manager.vision_query(image, query_to_process)
-        logger.info(f"Generated English answer: {answer}")
+        logger.debug(f"Generated English answer: {answer}")
 
         if tgt_lang != "eng_Latn":
             translated_answer = await perform_internal_translation(
@@ -100,10 +100,10 @@ async def visual_query(
                 model_manager=model_manager
             )
             final_answer = translated_answer[0]
-            logger.info(f"Translated answer to {tgt_lang}: {final_answer}")
+            logger.debug(f"Translated answer to {tgt_lang}: {final_answer}")
         else:
             final_answer = answer
-            logger.info("Answer kept in English, no translation needed")
+            logger.debug("Answer kept in English, no translation needed")
 
         return {"answer": final_answer}
     except Exception as e:
@@ -132,13 +132,13 @@ async def document_query(
                 model_manager=model_manager
             )
             query_to_process = translated_query[0]
-            logger.info(f"Translated query to English: {query_to_process}")
+            logger.debug(f"Translated query to English: {query_to_process}")
         else:
             query_to_process = query
-            logger.info("Query already in English, no translation needed")
+            logger.debug("Query already in English, no translation needed")
 
         answer = await llm_manager.document_query(image, query_to_process)
-        logger.info(f"Generated English answer: {answer}")
+        logger.debug(f"Generated English answer: {answer}")
 
         if tgt_lang != "eng_Latn":
             translated_answer = await perform_internal_translation(
@@ -175,7 +175,7 @@ async def visual_completion(
         img = Image.open(io.BytesIO(image_data))
         
         answer = await llm_manager.vision_completion(img, prompt, max_tokens, temperature)
-        logger.info(f"Generated English answer: {answer}")
+        logger.debug(f"Generated English answer: {answer}")
 
         return {"answer": answer}
     except Exception as e:
@@ -392,10 +392,10 @@ async def document_query_batch(
                 model_manager=model_manager
             )
             queries_to_process = translated_queries
-            logger.info(f"Translated queries to English: {translated_queries}")
+            logger.debug(f"Translated queries to English: {translated_queries}")
         else:
             queries_to_process = [item.query for item in request.images]
-            logger.info("Queries already in English, no translation needed")
+            logger.debug("Queries already in English, no translation needed")
 
         # Decode base64 images and prepare batch items
         batch_items = []
@@ -412,7 +412,7 @@ async def document_query_batch(
 
         # Process batch with LLMManager
         results = await llm_manager.document_query_batch(batch_items)
-        logger.info(f"Generated English results: {results}")
+        logger.debug(f"Generated English results: {results}")
 
         # Translate results to target language if tgt_lang is not eng_Latn
         if request.tgt_lang != "eng_Latn":
@@ -430,12 +430,12 @@ async def document_query_batch(
                 final_results = [""] * len(results)
                 for idx, translated_text in zip(non_empty_indices, translated_results):
                     final_results[idx] = translated_text
-                logger.info(f"Translated results to {request.tgt_lang}: {final_results}")
+                logger.debug(f"Translated results to {request.tgt_lang}: {final_results}")
             else:
                 final_results = results  # All results are empty, no translation needed
         else:
             final_results = results
-            logger.info("Results kept in English, no translation needed")
+            logger.debug("Results kept in English, no translation needed")
 
         # Construct response with page numbers
         response_results = [
@@ -501,10 +501,10 @@ async def document_query_batch(
                 model_manager=model_manager
             )
             queries_to_process = translated_queries
-            logger.info(f"Translated queries to English: {translated_queries}")
+            logger.debug(f"Translated queries to English: {translated_queries}")
         else:
             queries_to_process = [item.query for item in request.images]
-            logger.info("Queries already in English, no translation needed")
+            logger.debug("Queries already in English, no translation needed")
 
         # Decode base64 images and prepare batch items
         batch_items = []
@@ -521,7 +521,7 @@ async def document_query_batch(
 
         # Process batch with LLMManager
         results = await llm_manager.document_query_batch_old(batch_items)
-        logger.info(f"Generated English results: {results}")
+        logger.debug(f"Generated English results: {results}")
 
         # Translate results to target language if tgt_lang is not eng_Latn
         if request.tgt_lang != "eng_Latn":
@@ -539,12 +539,12 @@ async def document_query_batch(
                 final_results = [""] * len(results)
                 for idx, translated_text in zip(non_empty_indices, translated_results):
                     final_results[idx] = translated_text
-                logger.info(f"Translated results to {request.tgt_lang}: {final_results}")
+                logger.debug(f"Translated results to {request.tgt_lang}: {final_results}")
             else:
                 final_results = results  # All results are empty, no translation needed
         else:
             final_results = results
-            logger.info("Results kept in English, no translation needed")
+            logger.debug("Results kept in English, no translation needed")
 
         # Construct response with page numbers
         response_results = [

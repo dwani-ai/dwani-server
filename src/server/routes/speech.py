@@ -87,7 +87,7 @@ async def speech_to_speech(
             detail=f"Invalid language. Supported languages: {', '.join(valid_languages)}"
         )
     transcription = await transcribe_audio(file, language, asr_manager)
-    logger.info(f"Transcribed text: {transcription.text}")
+    logger.debug(f"Transcribed text: {transcription.text}")
 
     chat_request = ChatRequest(
         prompt=transcription.text,
@@ -95,7 +95,7 @@ async def speech_to_speech(
         tgt_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda")
     )
     processed_text = await chat(request, chat_request, llm_manager, model_manager, settings)
-    logger.info(f"Processed text: {processed_text.response}")
+    logger.debug(f"Processed text: {processed_text.response}")
 
     voice_request = KannadaSynthesizeRequest(text=processed_text.response)
     audio_response = await synthesize_kannada(voice_request, tts_manager)

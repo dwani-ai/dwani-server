@@ -550,11 +550,11 @@ class LLMManager:
             valid_page_numbers.append(page_number)
 
         if not valid_queries:
-            logger.info("No valid items to process in batch")
+            logger.debug("No valid items to process in batch")
             return results
 
         # Log input summary
-        logger.info(f"Processing {len(valid_queries)} valid items for pages {[pn for pn in valid_page_numbers]}")
+        logger.debug(f"Processing {len(valid_queries)} valid items for pages {[pn for pn in valid_page_numbers]}")
 
         # Prepare batched messages
         messages_vlm_batch = []
@@ -599,7 +599,7 @@ class LLMManager:
 
             with profiler:
                 try:
-                    logger.info(f"Attempting batch processing for sub-batch {start_idx}-{end_idx} (pages {[pn for pn in batch_page_numbers]})")
+                    logger.debug(f"Attempting batch processing for sub-batch {start_idx}-{end_idx} (pages {[pn for pn in batch_page_numbers]})")
                     start_time = time.time()
 
                     # Run batch processing with timeout
@@ -614,7 +614,7 @@ class LLMManager:
                         raise RuntimeError("Preprocessing timeout")
 
                     preprocess_time = time.time() - start_time
-                    logger.info(f"Preprocessing took {preprocess_time:.3f}s for sub-batch {start_idx}-{end_idx}")
+                    logger.debug(f"Preprocessing took {preprocess_time:.3f}s for sub-batch {start_idx}-{end_idx}")
 
                     # Move tensors to device with appropriate dtypes
                     for k in inputs_vlm:
@@ -637,7 +637,7 @@ class LLMManager:
                             temperature=0.7
                         )
                     generate_time = time.time() - start_time
-                    logger.info(f"Generation took {generate_time:.3f}s for sub-batch {start_idx}-{end_idx}")
+                    logger.debug(f"Generation took {generate_time:.3f}s for sub-batch {start_idx}-{end_idx}")
 
                     # Decode outputs
                     for i, (gen, input_len, idx, page_number) in enumerate(zip(generations, input_lens, batch_indices, batch_page_numbers)):
@@ -645,7 +645,7 @@ class LLMManager:
                             output = gen[input_len:]
                             decoded = self.processor.decode(output, skip_special_tokens=True)
                             results[idx] = decoded
-                            logger.info(f"Generated response for page {page_number}: {decoded[:100]}...")
+                            logger.debug(f"Generated response for page {page_number}: {decoded[:100]}...")
                         except Exception as e:
                             logger.error(f"Error in decoding for page {page_number}: {str(e)}")
                             results[idx] = ""
@@ -654,7 +654,7 @@ class LLMManager:
                     # Sequential fallback
                     for i, (messages, idx, page_number) in enumerate(zip(batch_messages, batch_indices, batch_page_numbers)):
                         try:
-                            logger.info(f"Attempting sequential processing for page {page_number}")
+                            logger.debug(f"Attempting sequential processing for page {page_number}")
                             start_time = time.time()
                             inputs_vlm = await asyncio.wait_for(
                                 asyncio.to_thread(self.processor.apply_chat_template, [messages],
@@ -662,7 +662,7 @@ class LLMManager:
                                 timeout=batch_timeout
                             )
                             preprocess_time = time.time() - start_time
-                            logger.info(f"Sequential preprocessing took {preprocess_time:.3f}s for page {page_number}")
+                            logger.debug(f"Sequential preprocessing took {preprocess_time:.3f}s for page {page_number}")
 
                             # Move tensors to device with appropriate dtypes
                             for k in inputs_vlm:
@@ -683,19 +683,19 @@ class LLMManager:
                                     temperature=0.7
                                 )
                             generate_time = time.time() - start_time
-                            logger.info(f"Sequential generation took {generate_time:.3f}s for page {page_number}")
+                            logger.debug(f"Sequential generation took {generate_time:.3f}s for page {page_number}")
 
                             output = generation[0][input_len:]
                             decoded = self.processor.decode(output, skip_special_tokens=True)
                             results[idx] = decoded
-                            logger.info(f"Generated response for page {page_number} (sequential): {decoded[:100]}...")
+                            logger.debug(f"Generated response for page {page_number} (sequential): {decoded[:100]}...")
                         except Exception as e:
                             logger.error(f"Error in sequential processing for page {page_number}: {str(e)}")
                             results[idx] = ""
 
             # Handle profiler output safely
             if profiler is not nullcontext() and hasattr(profiler, "key_averages"):
-                logger.info(f"Profiling results: {profiler.key_averages().table(sort_by='cuda_time_total', row_limit=10)}")
+                logger.debug(f"Profiling results: {profiler.key_averages().table(sort_by='cuda_time_total', row_limit=10)}")
 
         return results
     
