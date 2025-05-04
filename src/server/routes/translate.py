@@ -9,6 +9,7 @@ import torch
 
 router = APIRouter(prefix="/v1", tags=["translate"])
 
+@router.post("/translate", response_model=TranslationResponse)
 async def translate(request: TranslationRequest, translate_manager=Depends(get_model_manager)):
     input_sentences = request.sentences
     src_lang = request.src_lang
@@ -48,7 +49,7 @@ async def translate(request: TranslationRequest, translate_manager=Depends(get_m
     return TranslationResponse(translations=translations)
 
 
-@router.post("/translate", response_model=TranslationResponse)
+@router.post("/translate_ld", response_model=TranslationResponse)
 async def translate_v1(request: TranslationRequest, translate_manager=Depends(get_model_manager)):
     logger.debug(f"Received translation request: {request.dict()}")
     try:
