@@ -2,47 +2,8 @@
   "variant": "base",
   "hardware": "NVIDIA H100",
   "configs": {
-    "config_one": {
-      "description": "Kannada - Speech to Text",
-      "language": "kannada",
-      "components": {
-        "ASR": {
-          "model": "ai4bharat/indic-conformer-600m-multilingual",
-          "language_code": "kn",
-          "decoding": "rnnt"
-        },
-        "LLM": {
-          "model": "google/gemma-3-12b-it",
-          "max_tokens": 512
-        },
-        "Vision": {
-          "model": "moondream2"
-        },
-        "Translation": [
-          {
-            "type": "eng_indic",
-            "model": "ai4bharat/indictrans2-en-indic-1B",
-            "src_lang": "eng_Latn",
-            "tgt_lang": "kan_Knda"
-          },
-          {
-            "type": "indic_eng",
-            "model": "ai4bharat/indictrans2-indic-en-1B",
-            "src_lang": "kan_Knda",
-            "tgt_lang": "eng_Latn"
-          },
-          {
-            "type": "indic_indic",
-            "model": "ai4bharat/indictrans2-indic-indic-1B",
-            "src_lang": "kan_Knda",
-            "tgt_lang": "hin_Deva"
-          }
-        ],
-        "TTS": null
-      }
-    },
-    "config_two": {
-      "description": "Kannada - Speech to Speech",
+     "config_two": {
+      "description": "Kannada - Speech to Speech-large",
       "language": "kannada",
       "components": {
         "ASR": {
@@ -86,13 +47,13 @@
       }
     },
     "config_three": {
-      "description": "German - Speech to Text",
-      "language": "german",
+      "description": "Kannada - Speech to Speech-medium",
+      "language": "kannada",
       "components": {
         "ASR": {
-          "model": "openai/whisper",
-          "language_code": "de",
-          "decoding": "default"
+          "model": "ai4bharat/indic-conformer-600m-multilingual",
+          "language_code": "kn",
+          "decoding": "rnnt"
         },
         "LLM": {
           "model": "google/gemma-3-4b-it",
@@ -101,30 +62,29 @@
         "Vision": {
           "model": "moondream2"
         },
-        "Translation": null,
-        "TTS": null
-      }
-    },
-    "config_four": {
-      "description": "German - Speech to Speech",
-      "language": "german",
-      "components": {
-        "ASR": {
-          "model": "openai/whisper",
-          "language_code": "de",
-          "decoding": "default"
-        },
-        "LLM": {
-          "model": "google/gemma-3-4b-it",
-          "max_tokens": 512
-        },
-        "Vision": {
-          "model": "moondream2"
-        },
-        "Translation": null,
+        "Translation": [
+          {
+            "type": "eng_indic",
+            "model": "ai4bharat/indictrans2-en-indic-1B",
+            "src_lang": "eng_Latn",
+            "tgt_lang": "kan_Knda"
+          },
+          {
+            "type": "indic_eng",
+            "model": "ai4bharat/indictrans2-indic-1B",
+            "src_lang": "kan_Knda",
+            "tgt_lang": "eng_Latn"
+          },
+          {
+            "type": "indic_indic",
+            "model": "ai4bharat/indictrans2-indic-indic-1B",
+            "src_lang": "kan_Knda",
+            "tgt_lang": "hin_Deva"
+          }
+        ],
         "TTS": {
-          "model": "parler-tts",
-          "voice": "default_german_voice",
+          "model": "ai4bharat/indic-parler-tts",
+          "voice": "default_kannada_voice",
           "speed": 1.0,
           "response_format": "mp3"
         }
