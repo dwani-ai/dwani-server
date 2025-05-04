@@ -885,4 +885,15 @@ def initialize_managers(config_name: str, args):
         registry.asr_manager.model_language[selected_config["language"]] = selected_config["components"]["ASR"]["language_code"]
 
     if selected_config["components"]["Translation"]:
-        registry.translation_configs.extend(selected_config["components"]["Translation"])
+            # Store translation configurations
+            registry.translation_configs.extend(selected_config["components"]["Translation"])
+            # Initialize translation models for all supported language pairs
+            for translation_config in selected_config["components"]["Translation"]:
+                src_lang = translation_config.get("src_lang")
+                tgt_lang = translation_config.get("tgt_lang")
+                try:
+                    # Load or register model for the language pair
+                    registry.model_manager.get_model(src_lang, tgt_lang)
+                    logger.info(f"Registered translation model for {src_lang} -> {tgt_lang}")
+                except ValueError as e:
+                    logger.error(f"Failed to register translation model for {src_lang} -> {tgt_lang}: {str(e)}")
