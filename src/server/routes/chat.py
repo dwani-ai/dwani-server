@@ -14,9 +14,9 @@ from core.dependencies import get_llm_manager, get_model_manager, get_settings
 router = APIRouter(prefix="/v1", tags=["chat"])
 limiter = Limiter(key_func=get_remote_address)
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/indic_chat", response_model=ChatResponse)
 @limiter.limit(lambda: get_settings().chat_rate_limit)
-async def chat(
+async def indic_chat(
     request: Request,
     chat_request: ChatRequest,
     llm_manager=Depends(get_llm_manager),
@@ -62,8 +62,8 @@ async def chat(
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
-@router.post("/visual_query/")
-async def visual_query(
+@router.post("/indic_visual_query/")
+async def indic_visual_query(
     file: UploadFile = File(...),
     query: str = Body(...),
     src_lang: str = Query("kan_Knda", enum=list(SUPPORTED_LANGUAGES)),

@@ -11,7 +11,7 @@ from logging_config import logger
 from models.schemas import TranscriptionResponse, ChatRequest
 from config.constants import LANGUAGE_TO_SCRIPT
 from utils.tts_utils import load_audio_from_url, synthesize_speech, SynthesizeRequest, KannadaSynthesizeRequest, EXAMPLES
-from .chat import chat
+from .chat import indic_chat
 from core.dependencies import get_tts_manager, get_asr_manager, get_llm_manager, get_model_manager, get_settings
 
 router = APIRouter(prefix="/v1", tags=["speech"])
@@ -94,7 +94,7 @@ async def speech_to_speech(
         src_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda"),
         tgt_lang=LANGUAGE_TO_SCRIPT.get(language, "kan_Knda")
     )
-    processed_text = await chat(request, chat_request, llm_manager, model_manager, settings)
+    processed_text = await indic_chat(request, chat_request, llm_manager, model_manager, settings)
     logger.debug(f"Processed text: {processed_text.response}")
 
     voice_request = KannadaSynthesizeRequest(text=processed_text.response)
