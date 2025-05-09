@@ -1,44 +1,39 @@
 from .client import DhwaniClient
+from .chat import Chat
+from .audio import Audio
+from .vision import Vision
+from .asr import ASR
+from .exceptions import DhwaniAPIError
 
+__all__ = ["DhwaniClient", "Chat", "Audio", "Vision", "ASR", "DhwaniAPIError"]
+
+# Optionally, instantiate a default client for convenience
 api_key = None
 api_base = "http://localhost:7860"
 
-_client = None
-
 def _get_client():
     global _client
-    if _client is None:
-        _client = DhwaniClient(api_key=api_key, api_base=api_base)
-    return _client
+    if "_client" not in globals() or _client is None:
+        from .client import DhwaniClient
+        globals()["_client"] = DhwaniClient(api_key=api_key, api_base=api_base)
+    return globals()["_client"]
 
-class Chat:
+class chat:
     @staticmethod
-    def create(prompt):
-        return _get_client().chat(prompt)
+    def create(prompt, **kwargs):
+        return _get_client().chat(prompt, **kwargs)
 
-class Audio:
+class audio:
     @staticmethod
-    def speech(input, voice, model, response_format="mp3", output_file=None):
-        return _get_client().speech(input, voice, model, response_format, output_file)
+    def speech(*args, **kwargs):
+        return _get_client().speech(*args, **kwargs)
 
-class Vision:
+class vision:
     @staticmethod
-    def caption(file_path, length="short"):
-        return _get_client().caption(file_path, length)
-    @staticmethod
-    def visual_query(file_path, query):
-        return _get_client().visual_query(file_path, query)
-    @staticmethod
-    def detect(file_path, object_type):
-        return _get_client().detect(file_path, object_type)
-    @staticmethod
-    def point(file_path, object_type):
-        return _get_client().point(file_path, object_type)
+    def caption(*args, **kwargs):
+        return _get_client().caption(*args, **kwargs)
 
-class ASR:
+class asr:
     @staticmethod
-    def transcribe(file_path, language):
-        return _get_client().transcribe(file_path, language)
-    @staticmethod
-    def transcribe_batch(file_paths, language):
-        return _get_client().transcribe_batch(file_paths, language)
+    def transcribe(*args, **kwargs):
+        return _get_client().transcribe(*args, **kwargs)
