@@ -4,17 +4,18 @@ from .exceptions import DhwaniAPIError
 
 class DhwaniClient:
     def __init__(self, api_key=None, api_base=None):
-        self.api_key = api_key or os.getenv("DHWANI_API_KEY")
-        self.api_base = api_base or os.getenv("DHWANI_API_BASE", "http://localhost:7860")
+        self.api_key = api_key or os.getenv("DWANI_API_KEY")
+        self.api_base = api_base or os.getenv("DWANI_API_BASE", "http://localhost:7860")
         if not self.api_key:
             raise ValueError("DHWANI_API_KEY not set")
 
     def _headers(self):
         return {"X-API-Key": self.api_key}
 
-    def chat(self, prompt, **kwargs):
+    def chat(self, prompt, src_lang, tgt_lang, **kwargs):
         from .chat import chat_create
-        return chat_create(self, prompt, **kwargs)
+        return chat_create(self, prompt, src_lang, tgt_lang, **kwargs)
+
 
     def speech(self, *args, **kwargs):
         from .audio import audio_speech

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dwani"
-version = "0.1.1"
+version = "0.1.2"
 description = "Multimodal AI server for Indian languages (speech, vision, LLMs, TTS, ASR, etc.)"
 authors = [
     { name="sachin", email="python@dwani.ai" }
