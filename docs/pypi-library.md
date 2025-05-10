@@ -10,3 +10,4 @@ https://www.perplexity.ai/search/design-a-python-library-like-o-WMBBMvrST6ii_PqZ
 rm -rf dist/
  python -m build
 
+python -m twine upload dist/*

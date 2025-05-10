@@ -1,5 +1,5 @@
 from .exceptions import DhwaniAPIError
-
+import requests
 def vision_caption(client, file_path, length="short"):
     with open(file_path, "rb") as f:
         files = {"file": f}

@@ -1,5 +1,5 @@
 from .exceptions import DhwaniAPIError
-
+import requests
 def asr_transcribe(client, file_path, language):
     with open(file_path, "rb") as f:
         files = {"file": f}
@@ -18,6 +18,8 @@ class ASR:
         from . import _get_client
         return _get_client().transcribe(*args, **kwargs)
 
+
+'''
 from .docs import Documents
 
 class documents:
@@ -32,3 +34,4 @@ class documents:
     @staticmethod
     def summarize(file_path, language=None):
         return _get_client().document_summarize(file_path, language)
+'''

@@ -1,5 +1,5 @@
 from .exceptions import DhwaniAPIError
-
+import requests
 def chat_create(client, prompt, **kwargs):
     resp = requests.post(
         f"{client.api_base}/chat",

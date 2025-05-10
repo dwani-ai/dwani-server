@@ -1,5 +1,5 @@
 from .exceptions import DhwaniAPIError
-
+import requests
 def audio_speech(client, input, voice, model, response_format="mp3", output_file=None):
     data = {
         "input": input,
