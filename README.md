@@ -21,15 +21,7 @@ Dhwani API is a FastAPI-based application providing AI-powered services for Indi
 - **FFmpeg**: Required for audio processing (ASR).
 
 - Server Setup
-```bash
-wget https://github.com/slabstech/dhwani-server/blob/4445b380fc07d2e552cd98776465ee751b7e9997/install_script.sh
-chmod +x install_script.sh
-bash install_script.sh
 
-export HF_HOME=/home/ubuntu/data-dhwani-models
-export HF_TOKEN='YOur-HF-token'
-python src/server/main.py --host 0.0.0.0 --port 7860 --config config_two
-```
 ## Installation
 
 1. **Clone the Repository**:
@@ -154,3 +146,14 @@ python src/server/main.py --host 0.0.0.0 --port 7860 --config config_two
     FFmpeg Not Found: Install FFmpeg and ensure it’s in your PATH.
     Permission Denied: Run with sudo if accessing restricted ports (e.g., < 1024).
 
+
+- Misc
+```bash
+wget https://github.com/slabstech/dhwani-server/blob/4445b380fc07d2e552cd98776465ee751b7e9997/install_script.sh
+chmod +x install_script.sh
+bash install_script.sh
+
+export HF_HOME=/home/ubuntu/data-dhwani-models
+export HF_TOKEN='YOur-HF-token'
+python src/server/main.py --host 0.0.0.0 --port 7860 --config config_two
+```
